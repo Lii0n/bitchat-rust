@@ -1,5 +1,5 @@
 ﻿use anyhow::Result;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier, SecretKey};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, SharedSecret};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng},
@@ -16,8 +16,9 @@ pub struct KeyPair {
 
 impl KeyPair {
     pub fn generate() -> Self {
-        let secret_key = SecretKey::generate(&mut OsRng);
-        let signing_key = SigningKey::from_bytes(&secret_key);
+        let mut secret_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut secret_bytes);
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
         let verifying_key = signing_key.verifying_key();
         
         Self {

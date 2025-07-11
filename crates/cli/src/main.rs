@@ -112,6 +112,9 @@ impl BluetoothConnectionDelegate for BitchatBluetoothDelegate {
                     println!("⏹️ Stopped advertising");
                 }
             }
+            BluetoothEvent::PeerError { peer_id, error } => {
+                println!("❌ Error with peer {}: {}", &peer_id[..8], error);
+            }
         }
     }
 }
@@ -226,28 +229,22 @@ async fn run_interactive_mode(config: Config) -> Result<()> {
                             match core.send_protocol_message(line, None).await {
                                 Ok(_) => println!("📤 Broadcast: {}", line),
                                 Err(e) => {
-                                    println!("📤 Local: {} ({})", line, e);
+                                    println!("❌ Failed to broadcast: {}", e);
                                 }
                             }
                         }
-                        
+
+                        // Show prompt for next input
                         print!("> ");
                         io::stdout().flush()?;
                     }
                 }
             }
         }
-
-        // Send leave announcement
-        if let Err(e) = core.announce_leave().await {
-            println!("Warning: Could not send leave announcement: {}", e);
-        }
     } else {
-        println!("⚠️  Could not get Bluetooth event receiver");
-        return Ok(());
+        println!("⚠️  No Bluetooth event receiver available");
     }
 
-    println!("👋 Goodbye!");
     Ok(())
 }
 
@@ -258,40 +255,33 @@ async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, comman
     }
 
     match parts[0] {
-        "/help" | "/h" => {
-            println!("Commands:");
-            println!("  /help, /h           - Show this help");
-            println!("  /quit, /q           - Exit BitChat");
-            println!("  /peers, /who        - List connected peers");
-            println!("  /protocol, /p       - Show protocol information");
-            println!("  /announce           - Send ANNOUNCE packet");
-            println!("  /send <peer> <msg>  - Send direct message to peer");
-            println!("  /broadcast <msg>    - Broadcast message to all peers");
-            println!("  /clear              - Clear chat history");
-            println!("  /status             - Show connection status");
-            println!();
-            println!("Protocol Info:");
-            println!("  - Messages use binary protocol");
-            println!("  - Max 7 hops for relay");
-            println!("  - Automatic peer discovery");
-            println!("  - End-to-end encryption");
-        }
-        "/quit" | "/q" => {
-            println!("Shutting down...");
+        "/quit" | "/exit" | "/q" => {
+            println!("👋 Goodbye!");
             return Ok(true);
         }
-        "/peers" | "/who" => {
+        "/help" | "/h" => {
+            println!("Available commands:");
+            println!("  /help, /h          - Show this help");
+            println!("  /quit, /exit, /q   - Exit the application");
+            println!("  /peers, /p         - List connected peers");
+            println!("  /status, /s        - Show connection status");
+            println!("  /broadcast <msg>   - Broadcast a message");
+            println!("  /clear             - Clear the screen");
+            println!();
+            println!("Type any message (without /) to broadcast it to all peers.");
+        }
+        "/peers" | "/p" => {
             let peers = core.get_connected_peers().await;
             if peers.is_empty() {
                 println!("No connected peers");
             } else {
-                println!("Connected peers ({}):", peers.len());
+                println!("Connected peers ({}): ", peers.len());
                 for peer_id in peers {
                     if let Some(peer_info) = core.get_peer_info(&peer_id).await {
                         println!("  {} - {} (RSSI: {}dBm)", 
                                peer_info.short_id(),
                                peer_info.name.as_deref().unwrap_or("Unknown"),
-                               peer_info.rssi.unwrap_or(0)
+                               peer_info.rssi
                         );
                     } else {
                         println!("  {}", &peer_id[..8]);
@@ -299,44 +289,15 @@ async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, comman
                 }
             }
         }
-        "/protocol" | "/p" => {
-            println!("BitChat Protocol Information:");
-            println!("  My Peer ID: {}", core.get_my_peer_id());
-            println!("  Short ID: {}", core.get_my_short_peer_id());
-            println!("  Protocol Version: Binary v1.0");
-            println!("  Max TTL: 7 hops");
-            println!("  Encryption: XChaCha20-Poly1305");
-            println!("  Key Exchange: X25519");
-        }
-        "/announce" => {
-            match core.announce_presence().await {
-                Ok(_) => println!("✅ Sent ANNOUNCE packet"),
-                Err(e) => println!("❌ Failed to announce: {}", e),
-            }
-        }
-        "/send" => {
-            if parts.len() < 3 {
-                println!("Usage: /send <peer_short_id> <message>");
-                return Ok(false);
-            }
-            let _peer_short_id = parts[1];
-            let message = parts[2..].join(" ");
-            
-            // For now, just broadcast since we don't have peer ID mapping
-            match core.send_protocol_message(&message, None).await {
-                Ok(_) => println!("📤 Sent to network: {}", message),
-                Err(e) => println!("❌ Failed to send: {}", e),
-            }
-        }
-        "/broadcast" => {
+        "/broadcast" | "/b" => {
             if parts.len() < 2 {
                 println!("Usage: /broadcast <message>");
-                return Ok(false);
-            }
-            let message = parts[1..].join(" ");
-            match core.send_protocol_message(&message, None).await {
-                Ok(_) => println!("📤 Broadcast: {}", message),
-                Err(e) => println!("❌ Failed to broadcast: {}", e),
+            } else {
+                let message = parts[1..].join(" ");
+                match core.send_protocol_message(&message, None).await {
+                    Ok(_) => println!("📤 Broadcast: {}", message),
+                    Err(e) => println!("❌ Failed to broadcast: {}", e),
+                }
             }
         }
         "/clear" => {
@@ -344,7 +305,7 @@ async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, comman
             print!("\x1B[2J\x1B[1;1H");
             println!("Chat history cleared");
         }
-        "/status" => {
+        "/status" | "/s" => {
             let peers = core.get_connected_peers().await;
             println!("BitChat Status:");
             println!("  Device: {}", core.get_my_short_peer_id());
@@ -421,13 +382,17 @@ async fn clear_data(config: Config) -> Result<()> {
 }
 
 async fn show_protocol_info(config: Config) -> Result<()> {
+    // Extract the values we need before moving config
+    let device_name = config.device_name.clone();
+    let data_dir = config.data_dir.clone();
+    
     let core = init(config).await?;
     
     println!("BitChat Protocol Information:");
-    println!("  Device Name: {}", config.device_name);
+    println!("  Device Name: {}", device_name);
     println!("  Peer ID: {}", core.get_my_peer_id());
     println!("  Short ID: {}", core.get_my_short_peer_id());
-    println!("  Data Directory: {}", config.data_dir.display());
+    println!("  Data Directory: {}", data_dir.display());
     println!("  Protocol: Binary BitChat v1.0");
     println!("  Encryption: XChaCha20-Poly1305");
     println!("  Key Exchange: X25519");
