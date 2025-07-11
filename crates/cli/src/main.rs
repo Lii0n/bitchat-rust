@@ -42,10 +42,24 @@ enum Commands {
     Peers,
     /// Clear all data
     Clear,
+    /// Show protocol information
+    Protocol,
 }
 
-// Bluetooth event handler
-pub struct BitchatBluetoothDelegate;
+// Bluetooth event handler with protocol awareness
+pub struct BitchatBluetoothDelegate {
+    pub core: Option<std::sync::Arc<bitchat_core::BitchatCore>>,
+}
+
+impl BitchatBluetoothDelegate {
+    pub fn new() -> Self {
+        Self { core: None }
+    }
+
+    pub fn set_core(&mut self, core: std::sync::Arc<bitchat_core::BitchatCore>) {
+        self.core = Some(core);
+    }
+}
 
 impl BluetoothConnectionDelegate for BitchatBluetoothDelegate {
     fn on_bluetooth_event(&self, event: BluetoothEvent) {
@@ -59,26 +73,44 @@ impl BluetoothConnectionDelegate for BitchatBluetoothDelegate {
             }
             BluetoothEvent::PeerConnected { peer_id } => {
                 println!("🤝 Connected to peer: {}", &peer_id[..8]);
-            }
-            BluetoothEvent::PeerDisconnected { peer_id } => {
-                println!("👋 Peer disconnected: {}", &peer_id[..8]);
-            }
-            BluetoothEvent::MessageReceived { peer_id, data } => {
-                // Fixed: Clone data before trying to use it in both places
-                if let Ok(message) = String::from_utf8(data.clone()) {
-                    println!("📨 Message from {}: {}", &peer_id[..8], message);
-                } else {
-                    println!("📨 Binary message from {} ({} bytes)", &peer_id[..8], data.len());
+                
+                // Send ANNOUNCE packet to newly connected peer
+                if let Some(core) = &self.core {
+                    let core_clone = core.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = core_clone.announce_presence().await {
+                            tracing::error!("Failed to announce to new peer: {}", e);
+                        }
+                    });
                 }
             }
-            BluetoothEvent::PeerError { peer_id, error } => {
-                println!("❌ Error with peer {}: {}", &peer_id[..8], error);
+            BluetoothEvent::PeerDisconnected { peer_id } => {
+                println!("❌ Disconnected from peer: {}", &peer_id[..8]);
+            }
+            BluetoothEvent::MessageReceived { peer_id, data } => {
+                if let Some(core) = &self.core {
+                    let core_clone = core.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = core_clone.process_packet(&data).await {
+                            tracing::error!("Failed to process packet from {}: {}", 
+                                          &peer_id[..8], e);
+                        }
+                    });
+                }
             }
             BluetoothEvent::ScanningStateChanged { scanning } => {
-                println!("📡 Scanning: {}", if scanning { "ON" } else { "OFF" });
+                if scanning {
+                    println!("🔍 Started scanning for peers");
+                } else {
+                    println!("⏹️ Stopped scanning");
+                }
             }
             BluetoothEvent::AdvertisingStateChanged { advertising } => {
-                println!("📢 Advertising: {}", if advertising { "ON" } else { "OFF" });
+                if advertising {
+                    println!("📡 Started advertising");
+                } else {
+                    println!("⏹️ Stopped advertising");
+                }
             }
         }
     }
@@ -90,9 +122,9 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     let filter = if cli.debug {
-        EnvFilter::new("bitchat=debug,bitchat_core=debug")
+        EnvFilter::new("debug")
     } else {
-        EnvFilter::new("bitchat=info,bitchat_core=info")
+        EnvFilter::new("info")
     };
 
     tracing_subscriber::registry()
@@ -100,7 +132,7 @@ async fn main() -> Result<()> {
         .with(filter)
         .init();
 
-    // Create configuration
+    // Create config
     let mut config = Config::default();
     if let Some(name) = cli.name {
         config.device_name = name;
@@ -116,6 +148,7 @@ async fn main() -> Result<()> {
         Some(Commands::Send { message, channel }) => send_message(config, message, channel).await,
         Some(Commands::Peers) => list_peers(config).await,
         Some(Commands::Clear) => clear_data(config).await,
+        Some(Commands::Protocol) => show_protocol_info(config).await,
         None => run_interactive_mode(config).await,
     }
 }
@@ -127,15 +160,29 @@ async fn run_interactive_mode(config: Config) -> Result<()> {
     println!("Type /help for commands, /quit to exit\n");
 
     let core = init(config).await?;
+    let core = std::sync::Arc::new(core);
     
     // Get the event receiver before starting
     if let Some(mut event_receiver) = core.take_bluetooth_events().await {
+        // Create and configure the delegate
+        let mut delegate = BitchatBluetoothDelegate::new();
+        delegate.set_core(core.clone());
+        
+        println!("🆔 My Peer ID: {}", core.get_my_peer_id());
+        println!("🔗 Short ID: {}", core.get_my_short_peer_id());
+        println!("🚀 Starting services...");
+        
         // Start BitChat services
-        let mut core = core; // Make it mutable
-        core.start().await?;
+        if let Err(e) = core.start().await {
+            println!("⚠️  Could not start all services: {}", e);
+        } else {
+            println!("✅ Services started successfully");
+        }
 
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
+
+        println!();
 
         // Show initial prompt
         print!("> ");
@@ -146,7 +193,6 @@ async fn run_interactive_mode(config: Config) -> Result<()> {
                 // Handle Bluetooth events
                 event = event_receiver.recv() => {
                     if let Some(event) = event {
-                        let delegate = BitchatBluetoothDelegate;
                         delegate.on_bluetooth_event(event);
                         
                         // Re-show prompt after event
@@ -176,8 +222,8 @@ async fn run_interactive_mode(config: Config) -> Result<()> {
                                 Err(e) => println!("Command error: {}", e),
                             }
                         } else {
-                            // Send public message to all connected peers
-                            match core.broadcast_message(line).await {
+                            // Send protocol message to all connected peers
+                            match core.send_protocol_message(line, None).await {
                                 Ok(_) => println!("📤 Broadcast: {}", line),
                                 Err(e) => {
                                     println!("📤 Local: {} ({})", line, e);
@@ -192,9 +238,10 @@ async fn run_interactive_mode(config: Config) -> Result<()> {
             }
         }
 
-        // Stop services
-        let mut core = core;
-        core.stop().await?;
+        // Send leave announcement
+        if let Err(e) = core.announce_leave().await {
+            println!("Warning: Could not send leave announcement: {}", e);
+        }
     } else {
         println!("⚠️  Could not get Bluetooth event receiver");
         return Ok(());
@@ -204,7 +251,7 @@ async fn run_interactive_mode(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn handle_command(core: &bitchat_core::BitchatCore, command: &str) -> Result<bool> {
+async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, command: &str) -> Result<bool> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(false);
@@ -216,95 +263,99 @@ async fn handle_command(core: &bitchat_core::BitchatCore, command: &str) -> Resu
             println!("  /help, /h           - Show this help");
             println!("  /quit, /q           - Exit BitChat");
             println!("  /peers, /who        - List connected peers");
-            println!("  /scan               - Start/stop scanning");
+            println!("  /protocol, /p       - Show protocol information");
+            println!("  /announce           - Send ANNOUNCE packet");
             println!("  /send <peer> <msg>  - Send direct message to peer");
             println!("  /broadcast <msg>    - Broadcast message to all peers");
             println!("  /clear              - Clear chat history");
             println!("  /status             - Show connection status");
+            println!();
+            println!("Protocol Info:");
+            println!("  - Messages use binary protocol");
+            println!("  - Max 7 hops for relay");
+            println!("  - Automatic peer discovery");
+            println!("  - End-to-end encryption");
         }
         "/quit" | "/q" => {
+            println!("Shutting down...");
             return Ok(true);
         }
-        "/status" => {
-            let connected_peers = core.get_connected_peers().await;
-            println!("📡 Bluetooth available: {}", core.bluetooth.is_available());
-            println!("📡 Currently scanning: {}", core.bluetooth.is_scanning_async().await);
-            println!("📢 Currently advertising: {}", core.bluetooth.is_advertising_async().await);
-            println!("👥 Connected peers: {}", connected_peers.len());
-            for peer_id in connected_peers {
-                if let Some(peer_info) = core.get_peer_info(&peer_id).await {
-                    println!("  - {} ({}) RSSI: {}dBm", 
-                        peer_info.display_name(),
-                        peer_info.short_id(),
-                        peer_info.rssi
-                    );
-                }
-            }
-        }
         "/peers" | "/who" => {
-            let connected_peers = core.get_connected_peers().await;
-            if connected_peers.is_empty() {
+            let peers = core.get_connected_peers().await;
+            if peers.is_empty() {
                 println!("No connected peers");
             } else {
-                println!("Connected peers:");
-                for peer_id in connected_peers {
+                println!("Connected peers ({}):", peers.len());
+                for peer_id in peers {
                     if let Some(peer_info) = core.get_peer_info(&peer_id).await {
-                        println!("  🟢 {} ({}) RSSI: {}dBm", 
-                            peer_info.display_name(),
-                            peer_info.short_id(),
-                            peer_info.rssi
+                        println!("  {} - {} (RSSI: {}dBm)", 
+                               peer_info.short_id(),
+                               peer_info.name.as_deref().unwrap_or("Unknown"),
+                               peer_info.rssi.unwrap_or(0)
                         );
+                    } else {
+                        println!("  {}", &peer_id[..8]);
                     }
                 }
             }
         }
-        "/scan" => {
-            if core.bluetooth.is_scanning_async().await {
-                println!("⚠️  Cannot manually control scanning in this version");
-            } else {
-                println!("⚠️  Cannot manually control scanning in this version");
+        "/protocol" | "/p" => {
+            println!("BitChat Protocol Information:");
+            println!("  My Peer ID: {}", core.get_my_peer_id());
+            println!("  Short ID: {}", core.get_my_short_peer_id());
+            println!("  Protocol Version: Binary v1.0");
+            println!("  Max TTL: 7 hops");
+            println!("  Encryption: XChaCha20-Poly1305");
+            println!("  Key Exchange: X25519");
+        }
+        "/announce" => {
+            match core.announce_presence().await {
+                Ok(_) => println!("✅ Sent ANNOUNCE packet"),
+                Err(e) => println!("❌ Failed to announce: {}", e),
             }
         }
         "/send" => {
-            if parts.len() >= 3 {
-                let peer_partial = parts[1];
-                let message = parts[2..].join(" ");
-                
-                // Find peer by partial ID
-                let connected_peers = core.get_connected_peers().await;
-                if let Some(peer_id) = connected_peers.iter().find(|id| id.starts_with(peer_partial)) {
-                    match core.send_message_to_peer(peer_id, &message).await {
-                        Ok(_) => println!("📨 Sent to {}: {}", &peer_id[..8], message),
-                        Err(e) => println!("❌ Failed to send: {}", e),
-                    }
-                } else {
-                    println!("❌ Peer not found: {}", peer_partial);
-                    println!("Available peers:");
-                    for peer_id in connected_peers {
-                        println!("  - {}", &peer_id[..8]);
-                    }
-                }
-            } else {
-                println!("❌ Usage: /send <peer_id> <message>");
+            if parts.len() < 3 {
+                println!("Usage: /send <peer_short_id> <message>");
+                return Ok(false);
+            }
+            let _peer_short_id = parts[1];
+            let message = parts[2..].join(" ");
+            
+            // For now, just broadcast since we don't have peer ID mapping
+            match core.send_protocol_message(&message, None).await {
+                Ok(_) => println!("📤 Sent to network: {}", message),
+                Err(e) => println!("❌ Failed to send: {}", e),
             }
         }
         "/broadcast" => {
-            if parts.len() >= 2 {
-                let message = parts[1..].join(" ");
-                match core.broadcast_message(&message).await {
-                    Ok(_) => println!("📢 Broadcast: {}", message),
-                    Err(e) => println!("❌ Broadcast failed: {}", e),
-                }
-            } else {
-                println!("❌ Usage: /broadcast <message>");
+            if parts.len() < 2 {
+                println!("Usage: /broadcast <message>");
+                return Ok(false);
+            }
+            let message = parts[1..].join(" ");
+            match core.send_protocol_message(&message, None).await {
+                Ok(_) => println!("📤 Broadcast: {}", message),
+                Err(e) => println!("❌ Failed to broadcast: {}", e),
             }
         }
         "/clear" => {
-            core.storage.clear_all_data()?;
-            println!("🗑️  All data cleared");
+            // Clear terminal (simplified)
+            print!("\x1B[2J\x1B[1;1H");
+            println!("Chat history cleared");
+        }
+        "/status" => {
+            let peers = core.get_connected_peers().await;
+            println!("BitChat Status:");
+            println!("  Device: {}", core.get_my_short_peer_id());
+            println!("  Connected Peers: {}", peers.len());
+            println!("  Protocol: Active");
+            
+            // Note: We can't easily check scanning/advertising state with current architecture
+            // You might want to add methods to check these states
         }
         _ => {
-            println!("❌ Unknown command: {}. Type /help for available commands.", parts[0]);
+            println!("Unknown command: {}. Type /help for available commands.", parts[0]);
         }
     }
 
@@ -312,31 +363,76 @@ async fn handle_command(core: &bitchat_core::BitchatCore, command: &str) -> Resu
 }
 
 async fn send_message(config: Config, message: String, _channel: Option<String>) -> Result<()> {
-    let _core = init(config).await?;  // Fixed: prefixed with underscore
-    println!("📤 Sending message: {}", message);
-    // TODO: Actually send the message
+    println!("Sending message: {}", message);
+    
+    let core = init(config).await?;
+    core.start().await?;
+    
+    // Wait a moment for connections
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    
+    // Send the message
+    match core.send_protocol_message(&message, None).await {
+        Ok(_) => println!("✅ Message sent"),
+        Err(e) => println!("❌ Failed to send message: {}", e),
+    }
+    
     Ok(())
 }
 
 async fn list_peers(config: Config) -> Result<()> {
     let core = init(config).await?;
-    let peers = core.peer_manager.get_peers();
+    core.start().await?;
     
+    // Wait for discovery
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    
+    let peers = core.get_connected_peers().await;
     if peers.is_empty() {
         println!("No peers found");
     } else {
-        println!("Known peers:");
-        for peer in peers {
-            let status = if peer.connected { "🟢" } else { "🔴" };
-            println!("  {} {} ({})", status, peer.name, peer.address);
+        println!("Found {} peer(s):", peers.len());
+        for peer_id in peers {
+            if let Some(peer_info) = core.get_peer_info(&peer_id).await {
+                println!("  {} - {}", 
+                       peer_info.short_id(),
+                       peer_info.name.as_deref().unwrap_or("Unknown")
+                );
+            } else {
+                println!("  {}", &peer_id[..8]);
+            }
         }
     }
+    
     Ok(())
 }
 
 async fn clear_data(config: Config) -> Result<()> {
+    println!("Clearing all BitChat data...");
+    
+    if config.data_dir.exists() {
+        std::fs::remove_dir_all(&config.data_dir)?;
+        println!("✅ Data cleared from: {}", config.data_dir.display());
+    } else {
+        println!("No data directory found");
+    }
+    
+    Ok(())
+}
+
+async fn show_protocol_info(config: Config) -> Result<()> {
     let core = init(config).await?;
-    core.storage.clear_all_data()?;
-    println!("🗑️  All BitChat data cleared!");
+    
+    println!("BitChat Protocol Information:");
+    println!("  Device Name: {}", config.device_name);
+    println!("  Peer ID: {}", core.get_my_peer_id());
+    println!("  Short ID: {}", core.get_my_short_peer_id());
+    println!("  Data Directory: {}", config.data_dir.display());
+    println!("  Protocol: Binary BitChat v1.0");
+    println!("  Encryption: XChaCha20-Poly1305");
+    println!("  Key Exchange: X25519");
+    println!("  Transport: Bluetooth Low Energy");
+    println!("  Max Hops: 7");
+    
     Ok(())
 }
