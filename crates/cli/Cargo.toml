@@ -1,0 +1,23 @@
+﻿[package]
+name = "bitchat-cli"
+version = "0.1.0"
+edition = "2021"
+description = "BitChat command line interface"
+
+[[bin]]
+name = "bitchat-cli"
+path = "src/main.rs"
+
+[dependencies]
+bitchat-core = { path = "../core" }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["consoleapi"] }
