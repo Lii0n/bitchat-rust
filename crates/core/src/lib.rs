@@ -13,6 +13,7 @@ pub mod peer;
 pub mod protocol;   // NEW: Binary protocol implementation
 pub mod storage;
 pub mod config;
+pub mod channel;
 
 // Re-export main types
 pub use bluetooth::BluetoothManager;
@@ -22,6 +23,7 @@ pub use peer::{Peer, PeerManager};
 pub use protocol::{BitchatPacket, BinaryProtocolManager, PacketRouter, MessageType as ProtocolMessageType};
 pub use storage::Storage;
 pub use config::Config;
+pub use channel::ChannelManager;
 
 // Re-export Bluetooth types for easy access
 pub use bluetooth::{BluetoothEvent, BluetoothConnectionDelegate, ConnectedPeer, BluetoothConfig};
@@ -45,6 +47,8 @@ pub struct BitchatCore {
     pub config: Config,
     /// NEW: Binary protocol router for packet processing
     pub packet_router: Arc<RwLock<PacketRouter>>,
+    /// NEW: Channel manager for handling channels
+    pub channel_manager: Arc<Mutex<ChannelManager>>,
     /// NEW: Our peer ID for the protocol
     pub my_peer_id: [u8; 8],
 }
@@ -58,8 +62,9 @@ impl BitchatCore {
         // Generate our peer ID from device name
         let my_peer_id = peer_utils::peer_id_from_device_name(&config.device_name);
         
-        // Create packet router
+        // Create packet router and channel manager
         let packet_router = Arc::new(RwLock::new(PacketRouter::new(my_peer_id)));
+        let channel_manager = Arc::new(Mutex::new(ChannelManager::new()));
         
         // Create Bluetooth manager with custom config
         let bluetooth_config = BluetoothConfig::default()
@@ -75,6 +80,7 @@ impl BitchatCore {
             storage,
             config,
             packet_router,
+            channel_manager,
             my_peer_id,
         })
     }
@@ -153,7 +159,7 @@ impl BitchatCore {
             match recipient_id {
                 Some(recipient) => {
                     // Try to send directly to specific peer
-                    let _recipient_str = peer_utils::peer_id_to_string(&recipient);
+                    let _recipient_str = peer_utils::short_peer_id(&recipient);
                     // Note: This is simplified - in reality we'd need to map peer IDs to Bluetooth addresses
                     bluetooth.broadcast_message(&data).await?;
                     tracing::info!("Sent direct message to {}", peer_utils::short_peer_id(&recipient));
@@ -166,6 +172,100 @@ impl BitchatCore {
             }
         }
         
+        Ok(())
+    }
+
+    /// Join a channel and announce it
+    pub async fn join_channel(&self, channel: &str) -> Result<String> {
+        let joined = {
+            let mut cm = self.channel_manager.lock().await;
+            cm.join_channel(channel)?
+        };
+        
+        if joined {
+            // Send channel join packet
+            let packet = BinaryProtocolManager::create_channel_join_packet(
+                self.my_peer_id,
+                channel,
+            )?;
+            
+            let data = BinaryProtocolManager::encode(&packet)?;
+            let bluetooth = self.bluetooth.lock().await;
+            bluetooth.broadcast_message(&data).await?;
+            
+            Ok(format!("Joined channel {}", channel))
+        } else {
+            Ok(format!("Already in channel {}", channel))
+        }
+    }
+
+    /// Leave a channel and announce it
+    pub async fn leave_channel(&self, channel: &str) -> Result<String> {
+        let left = {
+            let mut cm = self.channel_manager.lock().await;
+            cm.leave_channel(channel)?
+        };
+        
+        if left {
+            // Send channel leave packet
+            let packet = BinaryProtocolManager::create_channel_leave_packet(
+                self.my_peer_id,
+                channel,
+            )?;
+            
+            let data = BinaryProtocolManager::encode(&packet)?;
+            let bluetooth = self.bluetooth.lock().await;
+            bluetooth.broadcast_message(&data).await?;
+            
+            Ok(format!("Left channel {}", channel))
+        } else {
+            Ok(format!("Not in channel {}", channel))
+        }
+    }
+
+    /// List joined channels
+    pub async fn list_channels(&self) -> Result<String> {
+        let cm = self.channel_manager.lock().await;
+        let channels = cm.get_joined_channels();
+        let current = cm.get_current_channel();
+        
+        if channels.is_empty() {
+            Ok("No channels joined".to_string())
+        } else {
+            let mut result = String::from("Joined channels:\n");
+            for channel in channels {
+                let marker = if current == Some(&channel) { " (current)" } else { "" };
+                result.push_str(&format!("  {}{}\n", channel, marker));
+            }
+            Ok(result)
+        }
+    }
+
+    /// Send a channel message
+    pub async fn send_channel_message(&self, channel: &str, content: &str) -> Result<()> {
+        // Check if we're joined to this channel
+        let is_joined = {
+            let cm = self.channel_manager.lock().await;
+            cm.is_joined(channel)
+        };
+        
+        if !is_joined {
+            return Err(anyhow::anyhow!("Not joined to channel: {}", channel));
+        }
+
+        // Create message with channel info in payload
+        let payload = format!("{}|{}", channel, content);
+        let packet = BinaryProtocolManager::create_message_packet(
+            self.my_peer_id,
+            None, // Broadcast to channel
+            &payload,
+        )?;
+
+        let data = BinaryProtocolManager::encode(&packet)?;
+        let bluetooth = self.bluetooth.lock().await;
+        bluetooth.broadcast_message(&data).await?;
+        
+        tracing::info!("Sent channel message to {}: {}", channel, content);
         Ok(())
     }
 
@@ -246,7 +346,7 @@ impl BitchatCore {
 
     /// Get our peer ID as a hex string
     pub fn get_my_peer_id(&self) -> String {
-        peer_utils::peer_id_to_string(&self.my_peer_id)
+        peer_utils::short_peer_id(&self.my_peer_id)
     }
 
     /// Get short peer ID for display
@@ -271,6 +371,16 @@ impl<'a> protocol::MessageProcessor for BitchatMessageProcessor<'a> {
     fn handle_message(&self, packet: &BitchatPacket, content: &str) {
         let sender = peer_utils::short_peer_id(&packet.sender_id);
         
+        // Check if this is a channel message (format: channel|content)
+        if let Some((channel, message_content)) = content.split_once('|') {
+            if channel.starts_with('#') {
+                // This is a channel message
+                tracing::info!("📨 Channel message in {}: {} from {}", channel, message_content, sender);
+                return;
+            }
+        }
+        
+        // Regular broadcast message
         if packet.is_broadcast() {
             tracing::info!("💬 Broadcast from {}: {}", sender, content);
         } else {
@@ -283,5 +393,19 @@ impl<'a> protocol::MessageProcessor for BitchatMessageProcessor<'a> {
         tracing::info!("👋 {} left the network", sender);
         
         // TODO: Remove peer from peer manager
+    }
+
+    fn handle_channel_join(&self, packet: &BitchatPacket) {
+        if let Ok(channel) = String::from_utf8(packet.payload.clone()) {
+            let sender = peer_utils::short_peer_id(&packet.sender_id);
+            tracing::info!("📢 {} joined channel: {}", sender, channel);
+        }
+    }
+
+    fn handle_channel_leave(&self, packet: &BitchatPacket) {
+        if let Ok(channel) = String::from_utf8(packet.payload.clone()) {
+            let sender = peer_utils::short_peer_id(&packet.sender_id);
+            tracing::info!("📤 {} left channel: {}", sender, channel);
+        }
     }
 }

@@ -66,7 +66,7 @@ impl BinaryProtocolManager {
 
         // Parse header (13 bytes)
         let version = buffer.get_u8();
-        let message_type = MessageType::try_from(buffer.get_u8())?;
+        let message_type = MessageType::try_from_u8(buffer.get_u8())?;
         let ttl = buffer.get_u8();
         let timestamp = buffer.get_u64(); // Big-endian
         let flags = buffer.get_u8();
@@ -98,14 +98,10 @@ impl BinaryProtocolManager {
 
         // Parse payload
         if buffer.remaining() < payload_length {
-            return Err(anyhow!(
-                "Not enough data for payload: expected {}, got {}",
-                payload_length,
-                buffer.remaining()
-            ));
+            return Err(anyhow!("Not enough data for payload"));
         }
-        let payload = buffer[..payload_length].to_vec();
-        buffer.advance(payload_length);
+        let mut payload = vec![0u8; payload_length];
+        buffer.copy_to_slice(&mut payload);
 
         // Parse optional signature (64 bytes)
         let signature = if flags & flags::HAS_SIGNATURE != 0 {
@@ -198,6 +194,73 @@ impl BinaryProtocolManager {
             sender_id,
             recipient_id,
             public_key.to_vec(),
+        ))
+    }
+
+    /// Create a CHANNEL_JOIN packet (NEW)
+    pub fn create_channel_join_packet(
+        sender_id: [u8; 8],
+        channel: &str,
+    ) -> Result<BitchatPacket> {
+        let payload = channel.as_bytes().to_vec();
+        Ok(BitchatPacket::new_broadcast(
+            MessageType::ChannelJoin,
+            sender_id,
+            payload,
+        ))
+    }
+
+    /// Create a CHANNEL_LEAVE packet (NEW)
+    pub fn create_channel_leave_packet(
+        sender_id: [u8; 8],
+        channel: &str,
+    ) -> Result<BitchatPacket> {
+        let payload = channel.as_bytes().to_vec();
+        Ok(BitchatPacket::new_broadcast(
+            MessageType::ChannelLeave,
+            sender_id,
+            payload,
+        ))
+    }
+
+    /// Create a CHANNEL_ANNOUNCE packet (NEW)
+    pub fn create_channel_announce_packet(
+        sender_id: [u8; 8],
+        channel: &str,
+        is_protected: bool,
+        creator_id: Option<&str>,
+        key_commitment: Option<&str>,
+    ) -> Result<BitchatPacket> {
+        // Payload format: channel|isProtected|creatorID|keyCommitment
+        let protected_flag = if is_protected { "1" } else { "0" };
+        let creator = creator_id.unwrap_or("");
+        let commitment = key_commitment.unwrap_or("");
+        let payload_str = format!("{}|{}|{}|{}", channel, protected_flag, creator, commitment);
+        let payload = payload_str.as_bytes().to_vec();
+        
+        Ok(BitchatPacket::new_broadcast(
+            MessageType::ChannelAnnounce,
+            sender_id,
+            payload,
+        ))
+    }
+
+    /// Create a CHANNEL_RETENTION packet (NEW)
+    pub fn create_channel_retention_packet(
+        sender_id: [u8; 8],
+        channel: &str,
+        enabled: bool,
+        creator_id: &str,
+    ) -> Result<BitchatPacket> {
+        // Payload format: channel|enabled|creatorID
+        let enabled_flag = if enabled { "1" } else { "0" };
+        let payload_str = format!("{}|{}|{}", channel, enabled_flag, creator_id);
+        let payload = payload_str.as_bytes().to_vec();
+        
+        Ok(BitchatPacket::new_broadcast(
+            MessageType::ChannelRetention,
+            sender_id,
+            payload,
         ))
     }
 
@@ -312,6 +375,36 @@ mod tests {
 
         assert_eq!(packet.message_type, MessageType::Announce);
         assert_eq!(packet.payload, nickname.as_bytes());
+        assert!(packet.is_broadcast());
+    }
+
+    #[test]
+    fn test_channel_join_packet() {
+        let sender_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        let channel = "#general";
+        
+        let packet = BinaryProtocolManager::create_channel_join_packet(
+            sender_id,
+            channel,
+        ).unwrap();
+
+        assert_eq!(packet.message_type, MessageType::ChannelJoin);
+        assert_eq!(packet.payload, channel.as_bytes());
+        assert!(packet.is_broadcast());
+    }
+
+    #[test]
+    fn test_channel_leave_packet() {
+        let sender_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        let channel = "#general";
+        
+        let packet = BinaryProtocolManager::create_channel_leave_packet(
+            sender_id,
+            channel,
+        ).unwrap();
+
+        assert_eq!(packet.message_type, MessageType::ChannelLeave);
+        assert_eq!(packet.payload, channel.as_bytes());
         assert!(packet.is_broadcast());
     }
 

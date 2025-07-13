@@ -266,9 +266,40 @@ async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, comman
             println!("  /peers, /p         - List connected peers");
             println!("  /status, /s        - Show connection status");
             println!("  /broadcast <msg>   - Broadcast a message");
+            println!("  /join, /j <channel> - Join a channel");          // NEW
+            println!("  /leave <channel>   - Leave a channel");          // NEW
+            println!("  /channels          - List joined channels");     // NEW
             println!("  /clear             - Clear the screen");
             println!();
             println!("Type any message (without /) to broadcast it to all peers.");
+        }
+        "/join" | "/j" => {                                              // NEW
+            if parts.len() < 2 {
+                println!("Usage: /join <channel>");
+            } else {
+                let channel = parts[1];
+                match core.join_channel(channel).await {
+                    Ok(msg) => println!("📢 {}", msg),
+                    Err(e) => println!("❌ Failed to join channel: {}", e),
+                }
+            }
+        }
+        "/leave" => {                                                   // NEW
+            if parts.len() < 2 {
+                println!("Usage: /leave <channel>");
+            } else {
+                let channel = parts[1];
+                match core.leave_channel(channel).await {
+                    Ok(msg) => println!("📤 {}", msg),
+                    Err(e) => println!("❌ Failed to leave channel: {}", e),
+                }
+            }
+        }
+        "/channels" => {                                                // NEW
+            match core.list_channels().await {
+                Ok(list) => println!("📋 {}", list),
+                Err(e) => println!("❌ Failed to list channels: {}", e),
+            }
         }
         "/peers" | "/p" => {
             let peers = core.get_connected_peers().await;
@@ -312,8 +343,15 @@ async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, comman
             println!("  Connected Peers: {}", peers.len());
             println!("  Protocol: Active");
             
-            // Note: We can't easily check scanning/advertising state with current architecture
-            // You might want to add methods to check these states
+            // Show channel info too
+            match core.list_channels().await {
+                Ok(channels) => {
+                    if !channels.contains("No channels") {
+                        println!("  {}", channels.replace('\n', "\n  "));
+                    }
+                },
+                Err(_) => {}
+            }
         }
         _ => {
             println!("Unknown command: {}. Type /help for available commands.", parts[0]);
@@ -323,7 +361,7 @@ async fn handle_command(core: &std::sync::Arc<bitchat_core::BitchatCore>, comman
     Ok(false)
 }
 
-async fn send_message(config: Config, message: String, _channel: Option<String>) -> Result<()> {
+async fn send_message(config: Config, message: String, channel: Option<String>) -> Result<()> {
     println!("Sending message: {}", message);
     
     let core = init(config).await?;
@@ -333,9 +371,21 @@ async fn send_message(config: Config, message: String, _channel: Option<String>)
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     
     // Send the message
-    match core.send_protocol_message(&message, None).await {
-        Ok(_) => println!("✅ Message sent"),
-        Err(e) => println!("❌ Failed to send message: {}", e),
+    match channel {
+        Some(channel_name) => {
+            // Send to specific channel
+            match core.send_channel_message(&channel_name, &message).await {
+                Ok(_) => println!("✅ Channel message sent to {}", channel_name),
+                Err(e) => println!("❌ Failed to send channel message: {}", e),
+            }
+        }
+        None => {
+            // Broadcast message
+            match core.send_protocol_message(&message, None).await {
+                Ok(_) => println!("✅ Message sent"),
+                Err(e) => println!("❌ Failed to send message: {}", e),
+            }
+        }
     }
     
     Ok(())

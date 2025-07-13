@@ -1,61 +1,79 @@
-﻿//! BitChat Packet Definitions
-//! 
-//! Universal packet format compatible with iOS and Android
-
-use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
+﻿// crates/core/src/protocol/packet.rs
+use serde::{Serialize, Deserialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Protocol version - must match mobile versions
+/// Protocol version - must match all platforms
 pub const PROTOCOL_VERSION: u8 = 1;
-
 /// Maximum TTL for message routing
 pub const MAX_TTL: u8 = 7;
-
-/// Fixed header size in bytes
+/// Header size in bytes
 pub const HEADER_SIZE: usize = 13;
-
-/// Fixed sender/recipient ID sizes
+/// Peer ID size in bytes
 pub const PEER_ID_SIZE: usize = 8;
+/// Signature size in bytes
 pub const SIGNATURE_SIZE: usize = 64;
 
-/// Message types - EXACT same values as iOS/Android
+/// Message types - EXACT same as mobile versions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum MessageType {
-    Announce = 0x01,
-    KeyExchange = 0x02,
-    Leave = 0x03,
-    Message = 0x04,
-    FragmentStart = 0x05,
-    FragmentContinue = 0x06,
-    FragmentEnd = 0x07,
-    ChannelAnnounce = 0x08,
-    ChannelRetention = 0x09,
-    DeliveryAck = 0x0A,
-    DeliveryStatusRequest = 0x0B,
-    ReadReceipt = 0x0C,
+    Announce = 1,
+    KeyExchange = 2,
+    Leave = 3,
+    Message = 4,
+    FragmentStart = 5,
+    FragmentContinue = 6,
+    FragmentEnd = 7,
+    ChannelAnnounce = 8,        // NEW: For channel discovery
+    ChannelRetention = 9,       // NEW: For message retention settings
+    DeliveryAck = 10,          // NEW: For delivery confirmations
+    DeliveryStatusRequest = 11, // NEW: For requesting delivery status
+    ReadReceipt = 12,          // NEW: For read receipts
+    ChannelJoin = 13,          // NEW: For joining channels
+    ChannelLeave = 14,         // NEW: For leaving channels
 }
 
-impl TryFrom<u8> for MessageType {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u8) -> Result<Self> {
+impl From<u8> for MessageType {
+    fn from(value: u8) -> Self {
         match value {
-            0x01 => Ok(MessageType::Announce),
-            0x02 => Ok(MessageType::KeyExchange),
-            0x03 => Ok(MessageType::Leave),
-            0x04 => Ok(MessageType::Message),
-            0x05 => Ok(MessageType::FragmentStart),
-            0x06 => Ok(MessageType::FragmentContinue),
-            0x07 => Ok(MessageType::FragmentEnd),
-            0x08 => Ok(MessageType::ChannelAnnounce),
-            0x09 => Ok(MessageType::ChannelRetention),
-            0x0A => Ok(MessageType::DeliveryAck),
-            0x0B => Ok(MessageType::DeliveryStatusRequest),
-            0x0C => Ok(MessageType::ReadReceipt),
-            _ => Err(anyhow!("Unknown message type: 0x{:02X}", value)),
+            1 => MessageType::Announce,
+            2 => MessageType::KeyExchange,
+            3 => MessageType::Leave,
+            4 => MessageType::Message,
+            5 => MessageType::FragmentStart,
+            6 => MessageType::FragmentContinue,
+            7 => MessageType::FragmentEnd,
+            8 => MessageType::ChannelAnnounce,
+            9 => MessageType::ChannelRetention,
+            10 => MessageType::DeliveryAck,
+            11 => MessageType::DeliveryStatusRequest,
+            12 => MessageType::ReadReceipt,
+            13 => MessageType::ChannelJoin,
+            14 => MessageType::ChannelLeave,
+            _ => MessageType::Message, // Default fallback
+        }
+    }
+}
+
+impl MessageType {
+    /// Try to create MessageType from u8, returning error for invalid values
+    pub fn try_from_u8(value: u8) -> anyhow::Result<Self> {
+        match value {
+            1 => Ok(MessageType::Announce),
+            2 => Ok(MessageType::KeyExchange),
+            3 => Ok(MessageType::Leave),
+            4 => Ok(MessageType::Message),
+            5 => Ok(MessageType::FragmentStart),
+            6 => Ok(MessageType::FragmentContinue),
+            7 => Ok(MessageType::FragmentEnd),
+            8 => Ok(MessageType::ChannelAnnounce),
+            9 => Ok(MessageType::ChannelRetention),
+            10 => Ok(MessageType::DeliveryAck),
+            11 => Ok(MessageType::DeliveryStatusRequest),
+            12 => Ok(MessageType::ReadReceipt),
+            13 => Ok(MessageType::ChannelJoin),
+            14 => Ok(MessageType::ChannelLeave),
+            _ => Err(anyhow::anyhow!("Invalid message type: {}", value)),
         }
     }
 }
@@ -75,6 +93,8 @@ impl std::fmt::Display for MessageType {
             MessageType::DeliveryAck => write!(f, "DELIVERY_ACK"),
             MessageType::DeliveryStatusRequest => write!(f, "DELIVERY_STATUS_REQUEST"),
             MessageType::ReadReceipt => write!(f, "READ_RECEIPT"),
+            MessageType::ChannelJoin => write!(f, "CHANNEL_JOIN"),
+            MessageType::ChannelLeave => write!(f, "CHANNEL_LEAVE"),
         }
     }
 }
@@ -124,7 +144,7 @@ impl BitchatPacket {
     ) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .unwrap()
             .as_millis() as u64;
 
         Self {
@@ -140,7 +160,7 @@ impl BitchatPacket {
         }
     }
 
-    /// Create a broadcast message (to all peers)
+    /// Create a broadcast packet
     pub fn new_broadcast(
         message_type: MessageType,
         sender_id: [u8; 8],
@@ -149,7 +169,7 @@ impl BitchatPacket {
         Self::new(message_type, sender_id, payload)
     }
 
-    /// Create a direct message (to specific peer)
+    /// Create a direct message packet
     pub fn new_direct(
         message_type: MessageType,
         sender_id: [u8; 8],
@@ -162,129 +182,82 @@ impl BitchatPacket {
         packet
     }
 
-    /// Check if this packet is a broadcast
+    /// Check if this is a broadcast packet
     pub fn is_broadcast(&self) -> bool {
-        match self.recipient_id {
-            None => true,
-            Some(recipient) => recipient == special_recipients::BROADCAST,
-        }
+        self.recipient_id.is_none()
     }
 
-    /// Check if this packet is for a specific recipient
-    pub fn is_for_recipient(&self, peer_id: &[u8; 8]) -> bool {
-        match self.recipient_id {
-            None => true, // Broadcast
-            Some(recipient) => {
-                recipient == special_recipients::BROADCAST || recipient == *peer_id
-            }
-        }
-    }
-
-    /// Set signature on this packet
-    pub fn with_signature(mut self, signature: [u8; 64]) -> Self {
-        self.signature = Some(signature);
-        self.flags |= flags::HAS_SIGNATURE;
-        self
-    }
-
-    /// Mark packet as compressed
-    pub fn with_compression(mut self) -> Self {
-        self.flags |= flags::IS_COMPRESSED;
-        self
-    }
-
-    /// Decrement TTL for routing
-    pub fn decrement_ttl(&mut self) -> bool {
-        if self.ttl > 0 {
-            self.ttl -= 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get total packet size when serialized
+    /// Calculate the serialized size of this packet
     pub fn serialized_size(&self) -> usize {
         let mut size = HEADER_SIZE + PEER_ID_SIZE; // Header + sender ID
-
+        
+        // Add recipient ID if present
         if self.flags & flags::HAS_RECIPIENT != 0 {
             size += PEER_ID_SIZE;
         }
-
+        
+        // Add payload size
         size += self.payload.len();
-
+        
+        // Add signature if present
         if self.flags & flags::HAS_SIGNATURE != 0 {
             size += SIGNATURE_SIZE;
         }
-
+        
         size
     }
 
-    /// Get unique packet ID for deduplication
+    /// Generate a unique ID for this packet for duplicate detection
     pub fn packet_id(&self) -> String {
-        // Combine sender ID, timestamp, and message type for unique ID
-        format!("{}-{}-{:02X}", 
-                hex::encode(&self.sender_id), 
-                self.timestamp, 
-                self.message_type as u8)
-    }
-
-    /// Check if packet is expired (older than TTL timeout)
-    pub fn is_expired(&self, max_age_ms: u64) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        // Use sender_id + timestamp + payload hash for uniqueness
+        let payload_hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            let mut hasher = DefaultHasher::new();
+            self.payload.hash(&mut hasher);
+            hasher.finish()
+        };
         
-        now.saturating_sub(self.timestamp) > max_age_ms
+        format!("{:016x}_{:016x}_{:016x}", 
+                u64::from_be_bytes(self.sender_id), 
+                self.timestamp, 
+                payload_hash)
     }
 }
 
-/// Utility functions for peer ID generation and manipulation
+/// Utility functions for peer ID handling
 pub mod peer_utils {
-    use rand::Rng;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     use anyhow::Result;
 
-    /// Generate a random 8-byte peer ID
-    pub fn generate_peer_id() -> [u8; 8] {
-        let mut rng = rand::thread_rng();
-        let mut peer_id = [0u8; 8];
-        rng.fill(&mut peer_id);
-        peer_id
+    /// Generate peer ID from device name
+    pub fn peer_id_from_device_name(device_name: &str) -> [u8; 8] {
+        let mut hasher = DefaultHasher::new();
+        device_name.hash(&mut hasher);
+        let hash = hasher.finish();
+        hash.to_be_bytes()
     }
 
-    /// Convert peer ID to hex string for display
+    /// Get short peer ID for logging
+    pub fn short_peer_id(peer_id: &[u8; 8]) -> String {
+        format!("{:02x}{:02x}{:02x}{:02x}", peer_id[0], peer_id[1], peer_id[2], peer_id[3])
+    }
+
+    /// Convert peer ID to hex string
     pub fn peer_id_to_string(peer_id: &[u8; 8]) -> String {
         hex::encode(peer_id).to_uppercase()
     }
 
-    /// Convert hex string to peer ID
-    pub fn string_to_peer_id(s: &str) -> Result<[u8; 8]> {
-        let bytes = hex::decode(s)?;
+    /// Parse hex string to peer ID
+    pub fn string_to_peer_id(hex_str: &str) -> Result<[u8; 8]> {
+        let bytes = hex::decode(hex_str)?;
         if bytes.len() != 8 {
-            return Err(anyhow::anyhow!("Invalid peer ID length: expected 8 bytes, got {}", bytes.len()));
+            return Err(anyhow::anyhow!("Peer ID must be exactly 8 bytes"));
         }
         let mut peer_id = [0u8; 8];
         peer_id.copy_from_slice(&bytes);
         Ok(peer_id)
-    }
-
-    /// Get short display ID (first 8 hex chars)
-    pub fn short_peer_id(peer_id: &[u8; 8]) -> String {
-        peer_id_to_string(peer_id)[..8].to_string()
-    }
-
-    /// Generate peer ID from device name (for compatibility)
-    pub fn peer_id_from_device_name(device_name: &str) -> [u8; 8] {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        device_name.hash(&mut hasher);
-        let hash = hasher.finish();
-        
-        // Convert u64 hash to 8 bytes
-        let bytes = hash.to_be_bytes();
-        bytes
     }
 }

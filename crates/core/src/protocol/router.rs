@@ -1,4 +1,4 @@
-﻿use super::{BitchatPacket, MessageType};
+﻿use super::{BitchatPacket, MessageType, peer_utils};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,6 +104,8 @@ pub trait MessageProcessor {
     fn handle_announce(&self, packet: &BitchatPacket, nickname: &str);
     fn handle_message(&self, packet: &BitchatPacket, content: &str);
     fn handle_leave(&self, packet: &BitchatPacket);
+    fn handle_channel_join(&self, packet: &BitchatPacket);
+    fn handle_channel_leave(&self, packet: &BitchatPacket);
 }
 
 /// Default message processor that just logs
@@ -112,17 +114,43 @@ pub struct DefaultMessageProcessor;
 impl MessageProcessor for DefaultMessageProcessor {
     fn handle_announce(&self, packet: &BitchatPacket, nickname: &str) {
         tracing::info!("ANNOUNCE from {}: {}", 
-                      hex::encode(&packet.sender_id[..4]), nickname);
+                      peer_utils::short_peer_id(&packet.sender_id), nickname);
     }
     
     fn handle_message(&self, packet: &BitchatPacket, content: &str) {
-        tracing::info!("MESSAGE from {}: {}", 
-                      hex::encode(&packet.sender_id[..4]), content);
+        let sender = peer_utils::short_peer_id(&packet.sender_id);
+        
+        // Check if this is a channel message (format: channel|content)
+        if let Some((channel, message_content)) = content.split_once('|') {
+            if channel.starts_with('#') {
+                tracing::info!("📨 Channel message in {}: {} from {}", channel, message_content, sender);
+                return;
+            }
+        }
+        
+        // Regular message
+        tracing::info!("MESSAGE from {}: {}", sender, content);
     }
     
     fn handle_leave(&self, packet: &BitchatPacket) {
         tracing::info!("LEAVE from {}", 
-                      hex::encode(&packet.sender_id[..4]));
+                      peer_utils::short_peer_id(&packet.sender_id));
+    }
+
+    fn handle_channel_join(&self, packet: &BitchatPacket) {
+        if let Ok(channel) = String::from_utf8(packet.payload.clone()) {
+            tracing::info!("📢 {} joined channel: {}", 
+                          peer_utils::short_peer_id(&packet.sender_id), 
+                          channel);
+        }
+    }
+
+    fn handle_channel_leave(&self, packet: &BitchatPacket) {
+        if let Ok(channel) = String::from_utf8(packet.payload.clone()) {
+            tracing::info!("📤 {} left channel: {}", 
+                          peer_utils::short_peer_id(&packet.sender_id), 
+                          channel);
+        }
     }
 }
 
@@ -142,18 +170,52 @@ pub fn process_packet_content(packet: &BitchatPacket, processor: &dyn MessagePro
         MessageType::Leave => {
             processor.handle_leave(packet);
         }
+        MessageType::ChannelJoin => {
+            processor.handle_channel_join(packet);
+        }
+        MessageType::ChannelLeave => {
+            processor.handle_channel_leave(packet);
+        }
         MessageType::KeyExchange => {
             tracing::debug!("KEY_EXCHANGE packet from {}", 
-                          hex::encode(&packet.sender_id[..4]));
+                          peer_utils::short_peer_id(&packet.sender_id));
         }
         MessageType::DeliveryAck => {
             tracing::debug!("DELIVERY_ACK packet from {}", 
-                          hex::encode(&packet.sender_id[..4]));
+                          peer_utils::short_peer_id(&packet.sender_id));
+        }
+        MessageType::ChannelAnnounce => {
+            if let Ok(payload) = String::from_utf8(packet.payload.clone()) {
+                let parts: Vec<&str> = payload.split('|').collect();
+                if parts.len() >= 4 {
+                    let channel = parts[0];
+                    let is_protected = parts[1] == "1";
+                    let creator_id = if parts[2].is_empty() { None } else { Some(parts[2]) };
+                    
+                    tracing::info!("📢 Channel announcement: {} (protected: {}, creator: {:?}) from {}", 
+                                  channel, is_protected, creator_id,
+                                  peer_utils::short_peer_id(&packet.sender_id));
+                }
+            }
+        }
+        MessageType::ChannelRetention => {
+            if let Ok(payload) = String::from_utf8(packet.payload.clone()) {
+                let parts: Vec<&str> = payload.split('|').collect();
+                if parts.len() >= 3 {
+                    let channel = parts[0];
+                    let enabled = parts[1] == "1";
+                    let creator_id = parts[2];
+                    
+                    tracing::info!("📝 Channel retention update: {} (enabled: {}, creator: {}) from {}", 
+                                  channel, enabled, creator_id,
+                                  peer_utils::short_peer_id(&packet.sender_id));
+                }
+            }
         }
         _ => {
             tracing::debug!("Other packet type {:?} from {}", 
                           packet.message_type,
-                          hex::encode(&packet.sender_id[..4]));
+                          peer_utils::short_peer_id(&packet.sender_id));
         }
     }
 }
