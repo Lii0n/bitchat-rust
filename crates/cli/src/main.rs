@@ -1,156 +1,106 @@
-﻿//! SecureMesh CLI Application with iOS/Android Compatibility
+﻿//! Bluetooth events and configuration for iOS/Android compatibility
 
-use anyhow::Result;
-use bitchat_core::SecureMeshCore;
-use clap::{Arg, Command};
-use std::io::{self, Write};
-use tracing::{info, error};
+use std::time::Instant;
+use serde::{Deserialize, Serialize};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+/// Bluetooth event types for mesh networking
+#[derive(Debug, Clone)]
+pub enum BluetoothEvent {
+    /// A new peer has connected
+    PeerConnected { peer_id: String },
     
-    // Parse command line arguments
-    let matches = Command::new("bitchat-cli")
-        .version("0.1.0")
-        .about("SecureMesh CLI - Secure P2P messaging with iOS/Android compatibility")
-        .arg(
-            Arg::new("peer-id")
-                .long("peer-id")
-                .value_name("ID")
-                .help("Set custom peer ID (8 hex characters)")
-        )
-        .get_matches();
+    /// A peer has disconnected
+    PeerDisconnected { peer_id: String },
     
-    info!("Starting SecureMesh CLI");
+    /// A message was received from a peer
+    MessageReceived { 
+        peer_id: String, 
+        data: Vec<u8> 
+    },
     
-    // Create and start the mesh core
-    let core = SecureMeshCore::new_with_compatibility().await?;
-    info!("SecureMesh core initialized with peer ID: {}", core.get_peer_id());
+    /// Bluetooth adapter state changed
+    AdapterStateChanged { powered_on: bool },
     
-    core.start().await?;
-    info!("SecureMesh services started");
+    /// Scanning state changed
+    ScanningStateChanged { scanning: bool },
     
-    // Print welcome message
-    println!("🔐 SecureMesh CLI");
-    println!("Peer ID: {}", core.get_peer_id());
-    println!("Type '/help' for commands or just type to chat");
-    println!("Use Ctrl+C to exit");
-    println!();
-    
-    // Main command loop
-    loop {
-        print!("> ");
-        io::stdout().flush()?;
-        
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                let input = input.trim();
-                if input.is_empty() {
-                    continue;
-                }
-                
-                if let Err(e) = process_input(&core, input).await {
-                    eprintln!("Error: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Failed to read input: {}", e);
-                break;
-            }
-        }
-    }
-    
-    Ok(())
+    /// Advertising state changed
+    AdvertisingStateChanged { advertising: bool },
 }
 
-async fn process_input(core: &SecureMeshCore, input: &str) -> Result<()> {
-    if input.starts_with('/') {
-        process_command(core, input).await
-    } else {
-        // Regular message - broadcast to all peers
-        core.broadcast_message(input).await?;
-        println!("📤 Sent: {}", input);
-        Ok(())
+/// Bluetooth configuration with iOS/Android compatibility
+#[derive(Debug, Clone)]
+pub struct BluetoothConfig {
+    /// Our peer ID (8 hex characters for iOS/Android compatibility)
+    pub peer_id: String,
+    
+    /// Maximum number of simultaneous connections
+    pub max_connections: usize,
+    
+    /// Scan timeout in seconds
+    pub scan_timeout: u64,
+    
+    /// Connection timeout in seconds
+    pub connection_timeout: u64,
+    
+    /// Enable automatic reconnection
+    pub auto_reconnect: bool,
+    
+    /// iOS/Android compatibility mode
+    pub ios_android_compatible: bool,
+}
+
+impl Default for BluetoothConfig {
+    fn default() -> Self {
+        Self {
+            peer_id: String::new(), // Will be generated
+            max_connections: 8, // Match iOS/Android limits
+            scan_timeout: 30,
+            connection_timeout: 10,
+            auto_reconnect: true,
+            ios_android_compatible: true, // Default to compatibility mode
+        }
     }
 }
 
-async fn process_command(core: &SecureMeshCore, input: &str) -> Result<()> {
-    let parts: Vec<&str> = input.splitn(2, ' ').collect();
-    let command = parts[0];
-    let args = parts.get(1).unwrap_or(&"");
+/// Information about a connected peer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectedPeer {
+    /// Peer ID (8-character hex for iOS/Android compatibility)
+    pub peer_id: String,
     
-    match command {
-        "/help" | "/h" => {
-            println!("Available commands:");
-            println!("  /help, /h          - Show this help");
-            println!("  /quit, /exit, /q   - Exit the application");
-            println!("  /peers, /p         - List connected peers");
-            println!("  /join, /j <channel> - Join a channel");
-            println!("  /leave <channel>   - Leave a channel");
-            println!("  /channels          - List joined channels");
-            println!("  /debug             - Show debug information");
-            println!("  /clear             - Clear the screen");
-            println!();
-            println!("Type any message (without /) to broadcast it to all peers.");
-        }
-        "/quit" | "/exit" | "/q" => {
-            println!("👋 Goodbye!");
-            std::process::exit(0);
-        }
-        "/peers" | "/p" => {
-            let peers = core.get_connected_peers().await;
-            if peers.is_empty() {
-                println!("No connected peers");
-            } else {
-                println!("Connected peers ({}):", peers.len());
-                for peer_id in peers {
-                    println!("  - {}", peer_id);
-                }
-            }
-        }
-        "/join" | "/j" => {
-            if args.is_empty() {
-                println!("Usage: /join <channel>");
-            } else {
-                match core.join_channel(args).await {
-                    Ok(msg) => println!("📢 {}", msg),
-                    Err(e) => println!("❌ Failed to join channel: {}", e),
-                }
-            }
-        }
-        "/leave" => {
-            if args.is_empty() {
-                println!("Usage: /leave <channel>");
-            } else {
-                match core.leave_channel(args).await {
-                    Ok(msg) => println!("📤 {}", msg),
-                    Err(e) => println!("❌ Failed to leave channel: {}", e),
-                }
-            }
-        }
-        "/channels" => {
-            match core.list_channels().await {
-                Ok(list) => println!("📋 {}", list),
-                Err(e) => println!("❌ Failed to list channels: {}", e),
-            }
-        }
-        "/debug" => {
-            let debug_info = core.get_debug_info().await;
-            println!("🔧 Debug Information:");
-            println!("{}", debug_info);
-        }
-        "/clear" => {
-            // Clear screen (works on most terminals)
-            print!("\x1B[2J\x1B[1;1H");
-            io::stdout().flush()?;
-        }
-        _ => {
-            println!("Unknown command: {}. Type '/help' for available commands.", command);
+    /// Device ID (platform-specific identifier)
+    pub device_id: String,
+    
+    /// When the connection was established
+    pub connected_at: Instant,
+    
+    /// Last time we heard from this peer
+    pub last_seen: Instant,
+}
+
+impl ConnectedPeer {
+    /// Get a short version of the peer ID for display (iOS/Android format)
+    pub fn short_id(&self) -> String {
+        if self.peer_id.len() >= 8 {
+            self.peer_id[..8].to_string()
+        } else {
+            self.peer_id.clone()
         }
     }
     
-    Ok(())
+    /// Get connection duration
+    pub fn connection_duration(&self) -> std::time::Duration {
+        self.connected_at.elapsed()
+    }
+    
+    /// Get time since last activity
+    pub fn time_since_last_seen(&self) -> std::time::Duration {
+        self.last_seen.elapsed()
+    }
+    
+    /// Check if this peer is from iOS/Android based on peer ID format
+    pub fn is_ios_android_peer(&self) -> bool {
+        self.peer_id.len() == 8 && self.peer_id.chars().all(|c| c.is_ascii_hexdigit())
+    }
 }

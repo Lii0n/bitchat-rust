@@ -1,449 +1,299 @@
-﻿//! Bluetooth Connection Manager - Core mesh networking implementation with iOS/Android compatibility
+﻿//! Compatibility layer for connecting Rust devices to existing iOS/Android mesh
+//! 
+//! This module implements connection arbitration logic that prevents dual role conflicts
+//! by ensuring deterministic connection behavior compatible with iOS/Android implementations.
 
-use super::events::{BluetoothEvent, ConnectedPeer, BluetoothConfig};
-use super::compatibility::CompatibilityManager;
-use anyhow::{Result, anyhow};
-#[cfg(feature = "bluetooth")]
-use btleplug::api::{
-    Central, Manager as _, Peripheral as _, ScanFilter
-};
-#[cfg(feature = "bluetooth")]
-use btleplug::platform::{Manager, Adapter};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::{mpsc, RwLock, Mutex};
-use uuid::Uuid;
-use tracing::{info, warn, error, debug};
-use tokio_stream::StreamExt;
+use tokio::sync::RwLock;
+use tracing::{info, debug, warn};
 
-/// BitChat service UUID - MUST MATCH iOS/macOS versions EXACTLY
-pub const BITCHAT_SERVICE_UUID: Uuid = uuid::uuid!("F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C");
-/// Message characteristic UUID - MUST MATCH iOS/macOS versions EXACTLY  
-pub const MESSAGE_CHARACTERISTIC_UUID: Uuid = uuid::uuid!("A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D");
-
-/// Main Bluetooth connection manager with iOS/Android compatibility
-pub struct BluetoothConnectionManager {
-    config: BluetoothConfig,
-    #[cfg(feature = "bluetooth")]
-    manager: Option<Manager>,
-    #[cfg(feature = "bluetooth")]
-    adapter: Option<Adapter>,
-    
-    // Compatibility layer
-    compatibility: Option<CompatibilityManager>,
-    
-    // Connection state
-    connected_peers: Arc<RwLock<HashMap<String, ConnectedPeer>>>,
-    scanning: Arc<RwLock<bool>>,
-    advertising: Arc<RwLock<bool>>,
-    
-    // Event handling
-    event_sender: mpsc::UnboundedSender<BluetoothEvent>,
-    event_receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<BluetoothEvent>>>>,
-    
-    // Background tasks
-    scan_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    cleanup_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+/// Compatibility manager that makes Rust devices work with existing iOS/Android implementations
+#[derive(Clone)]
+pub struct CompatibilityManager {
+    my_peer_id: String,
+    connections_in_progress: Arc<RwLock<HashSet<String>>>,
+    connection_attempts: Arc<RwLock<HashMap<String, ConnectionAttempt>>>,
+    discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
 }
 
-impl BluetoothConnectionManager {
-    /// Create a new BluetoothConnectionManager with iOS/Android compatibility
-    pub async fn new_with_compatibility() -> Result<Self> {
-        // Generate iOS/Android compatible peer ID (8 hex characters)
-        let peer_id = CompatibilityManager::generate_compatible_peer_id();
-        info!("Generated compatible peer ID: {}", peer_id);
-        
-        let config = BluetoothConfig {
-            peer_id: peer_id.clone(),
-            ..Default::default()
-        };
-        
-        Self::with_compatibility_config(config).await
-    }
+#[derive(Clone)]
+struct ConnectionAttempt {
+    started_at: Instant,
+    retry_count: u32,
+}
 
-    /// Create a new BluetoothConnectionManager with custom config and compatibility
-    pub async fn with_compatibility_config(config: BluetoothConfig) -> Result<Self> {
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        
-        // Create compatibility manager
-        let compatibility = CompatibilityManager::new(config.peer_id.clone());
-        
-        let mut manager = Self {
-            config,
-            manager: None,
-            adapter: None,
-            compatibility: Some(compatibility),
-            connected_peers: Arc::new(RwLock::new(HashMap::new())),
-            scanning: Arc::new(RwLock::new(false)),
-            advertising: Arc::new(RwLock::new(false)),
-            event_sender,
-            event_receiver: Arc::new(Mutex::new(Some(event_receiver))),
-            scan_task: Arc::new(Mutex::new(None)),
-            cleanup_task: Arc::new(Mutex::new(None)),
-        };
+#[derive(Clone)]
+struct DiscoveredDevice {
+    peer_id: String,
+    device_id: String,
+    rssi: i8,
+    last_seen: Instant,
+}
 
-        // Try to initialize, but don't fail if Bluetooth unavailable
-        if let Err(e) = manager.initialize().await {
-            warn!("Bluetooth initialization failed: {}. Running in offline mode.", e);
+impl CompatibilityManager {
+    pub fn new(my_peer_id: String) -> Self {
+        info!("Initializing compatibility manager with peer ID: {}", my_peer_id);
+        Self {
+            my_peer_id,
+            connections_in_progress: Arc::new(RwLock::new(HashSet::new())),
+            connection_attempts: Arc::new(RwLock::new(HashMap::new())),
+            discovered_devices: Arc::new(RwLock::new(HashMap::new())),
         }
-
-        Ok(manager)
     }
-
-    /// Initialize the Bluetooth manager
-    async fn initialize(&mut self) -> Result<()> {
-        info!("Initializing Bluetooth with iOS/Android compatibility...");
-        info!("Service UUID: {}", BITCHAT_SERVICE_UUID);
-        info!("Characteristic UUID: {}", MESSAGE_CHARACTERISTIC_UUID);
-        info!("My Peer ID: {}", self.config.peer_id);
-        
-        let manager = Manager::new().await?;
-        let adapters = manager.adapters().await?;
-        
-        if adapters.is_empty() {
-            return Err(anyhow!("No Bluetooth adapters found"));
-        }
-        
-        let adapter = adapters.into_iter().next().unwrap();
-        info!("Using Bluetooth adapter: {:?}", adapter.adapter_info().await);
-        
-        self.manager = Some(manager);
-        self.adapter = Some(adapter);
-        
-        // Start cleanup task
-        self.start_cleanup_task().await;
-        
-        Ok(())
+    
+    /// Determine if we should connect to this peer based on peer ID comparison
+    /// This is the key to avoiding dual role conflicts with iOS/Android
+    pub fn should_initiate_connection(&self, remote_peer_id: &str) -> bool {
+        // Use lexicographic comparison - lower peer ID connects to higher
+        // This ensures deterministic connection behavior across all platforms
+        let should_connect = self.my_peer_id < remote_peer_id;
+        debug!("Connection decision: {} {} {} = {}", 
+               self.my_peer_id, 
+               if should_connect { "<" } else { ">=" },
+               remote_peer_id,
+               should_connect);
+        should_connect
     }
-
-    /// Start services with compatibility mode
-    pub async fn start(&mut self) -> Result<()> {
-        info!("Starting Bluetooth mesh services in compatibility mode");
-        
-        // Start advertising first (as peripheral)
-        self.start_advertising_compatible().await?;
-        
-        // Start scanning (as central)
-        self.start_scanning_compatible().await?;
-        
-        info!("Bluetooth mesh services started successfully");
-        Ok(())
-    }
-
-    /// Start advertising with iOS/Android compatible format
-    pub async fn start_advertising_compatible(&self) -> Result<()> {
-        let compatibility = self.compatibility.as_ref()
-            .ok_or_else(|| anyhow!("Compatibility manager not initialized"))?;
-        
-        let advertisement_name = compatibility.create_advertisement_name();
-        info!("Starting advertising with compatible name: {}", advertisement_name);
-        
-        // Implementation depends on your BLE library setup
-        // This is a placeholder - you'll need to implement the actual advertising
-        self.start_advertising_with_name(&advertisement_name).await?;
-        
-        let mut advertising = self.advertising.write().await;
-        *advertising = true;
-        
-        Ok(())
-    }
-
-    /// Start scanning with compatibility logic
-    pub async fn start_scanning_compatible(&self) -> Result<()> {
-        let adapter = self.adapter.as_ref()
-            .ok_or_else(|| anyhow!("No Bluetooth adapter available"))?;
-        
-        info!("Starting compatible scanning for bitchat devices");
-        
-        // Start scanning for bitchat service UUID
-        adapter.start_scan(ScanFilter {
-            services: vec![BITCHAT_SERVICE_UUID],
-        }).await?;
-        
-        let mut scanning = self.scanning.write().await;
-        *scanning = true;
-        
-        // Start discovery monitoring task
-        self.start_discovery_task().await?;
-        
-        Ok(())
-    }
-
-    /// Handle discovered device with compatibility logic
-    pub async fn handle_discovered_device_compatible(
+    
+    /// Process discovered device and decide whether to connect
+    pub async fn handle_discovered_device(
         &self,
         device_id: String,
         device_name: Option<String>,
         rssi: i8,
-    ) -> Result<()> {
-        let compatibility = self.compatibility.as_ref()
-            .ok_or_else(|| anyhow!("Compatibility manager not initialized"))?;
-        
-        let current_connections = self.connected_peers.read().await.len();
-        let max_connections = 8; // Match iOS/Android limit
-        
-        if let Some(peer_id) = compatibility.handle_discovered_device(
-            device_id.clone(),
-            device_name,
-            rssi,
-            current_connections,
-            max_connections,
-        ).await {
-            info!("Attempting to connect to peer: {}", peer_id);
-            
-            // Add jitter delay to avoid simultaneous attempts
-            let jitter_ms = fastrand::u64(100..=500);
-            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
-            
-            // Double-check we should still connect after jitter
-            if compatibility.should_initiate_connection(&peer_id) {
-                match self.connect_to_device(&device_id).await {
-                    Ok(_) => {
-                        info!("Successfully connected to {}", peer_id);
-                        compatibility.mark_connection_complete(&peer_id).await;
-                        
-                        // Add to connected peers
-                        let connected_peer = ConnectedPeer {
-                            peer_id: peer_id.clone(),
-                            device_id,
-                            connected_at: Instant::now(),
-                            last_seen: Instant::now(),
-                        };
-                        
-                        let mut peers = self.connected_peers.write().await;
-                        peers.insert(peer_id.clone(), connected_peer);
-                        
-                        // Notify connection event
-                        let _ = self.event_sender.send(BluetoothEvent::PeerConnected { peer_id });
-                    }
-                    Err(e) => {
-                        warn!("Failed to connect to {}: {}", peer_id, e);
-                        compatibility.mark_connection_complete(&peer_id).await;
-                        
-                        // Schedule retry if appropriate
-                        self.schedule_retry_connection(peer_id, device_id).await?;
-                    }
-                }
-            } else {
-                info!("Connection role changed during jitter, aborting connection to {}", peer_id);
-                compatibility.mark_connection_complete(&peer_id).await;
+        current_connections: usize,
+        max_connections: usize,
+    ) -> Option<String> {
+        // Extract peer ID from device name (8-character format used by iOS/Android)
+        let peer_id = match device_name.as_ref().and_then(|name| self.extract_peer_id(name)) {
+            Some(id) => id,
+            None => {
+                debug!("No valid peer ID found in device name: {:?}", device_name);
+                return None;
             }
-        }
+        };
         
-        Ok(())
-    }
-
-    /// Schedule connection retry with exponential backoff
-    async fn schedule_retry_connection(&self, peer_id: String, device_id: String) -> Result<()> {
-        let compatibility = self.compatibility.as_ref()
-            .ok_or_else(|| anyhow!("Compatibility manager not initialized"))?;
+        info!("Discovered peer: {}, RSSI: {}, Device: {}", peer_id, rssi, device_id);
         
-        if compatibility.should_retry_connection(&peer_id).await {
-            let retry_delay = compatibility.get_retry_delay(&peer_id).await;
-            info!("Scheduling retry for {} after {:?}", peer_id, retry_delay);
-            
-            // Clone necessary data for the retry task
-            let compatibility_clone = compatibility.clone(); // You'll need to make CompatibilityManager cloneable
-            let manager_clone = self.clone(); // You'll need to make BluetoothConnectionManager cloneable
-            
-            tokio::spawn(async move {
-                tokio::time::sleep(retry_delay).await;
-                
-                // Only retry if we should still be the one connecting
-                if compatibility_clone.should_initiate_connection(&peer_id) {
-                    if let Err(e) = manager_clone.handle_discovered_device_compatible(
-                        device_id,
-                        Some(peer_id.clone()),
-                        -70 // Use a reasonable default RSSI for retry
-                    ).await {
-                        error!("Retry connection failed for {}: {}", peer_id, e);
-                    }
-                }
-            });
-        } else {
-            info!("Max retries reached for {}", peer_id);
-        }
-        
-        Ok(())
-    }
-
-    /// Handle device disconnection
-    pub async fn handle_device_disconnected(&self, peer_id: String, was_error: bool) -> Result<()> {
-        info!("Disconnected from peer: {}", peer_id);
-        
-        // Remove from connected peers
+        // Store discovered device info
         {
-            let mut peers = self.connected_peers.write().await;
-            peers.remove(&peer_id);
+            let mut discovered = self.discovered_devices.write().await;
+            discovered.insert(device_id.clone(), DiscoveredDevice {
+                peer_id: peer_id.clone(),
+                device_id: device_id.clone(),
+                rssi,
+                last_seen: Instant::now(),
+            });
         }
         
-        // Mark connection as complete in compatibility manager
-        if let Some(compatibility) = &self.compatibility {
-            compatibility.mark_connection_complete(&peer_id).await;
+        // Check if we should initiate connection
+        if !self.should_initiate_connection(&peer_id) {
+            info!("Not my role to connect to {} - they should connect to me", peer_id);
+            return None;
         }
         
-        // Notify disconnection event
-        let _ = self.event_sender.send(BluetoothEvent::PeerDisconnected { peer_id: peer_id.clone() });
+        // Check connection limiting
+        if current_connections >= max_connections {
+            info!("Connection limit reached ({}/{})", current_connections, max_connections);
+            return None;
+        }
         
-        // Auto-reconnect if this was unexpected and we should be the connector
-        if was_error {
-            if let Some(compatibility) = &self.compatibility {
-                if compatibility.should_initiate_connection(&peer_id) {
-                    info!("Scheduling reconnection attempt for {} after unexpected disconnect", peer_id);
-                    
-                    let manager_clone = self.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        
-                        // Only reconnect if we're still not connected
-                        let current_connections = manager_clone.connected_peers.read().await;
-                        if !current_connections.contains_key(&peer_id) {
-                            info!("Attempting to rediscover {} after unexpected disconnect", peer_id);
-                            // The scanning will naturally rediscover the device if it's still advertising
-                        }
-                    });
-                }
+        // Check signal strength (same threshold as Android implementation)
+        if rssi < -85 {
+            info!("Signal too weak for {}: {}", peer_id, rssi);
+            return None;
+        }
+        
+        // Check if connection is already in progress
+        if self.is_connection_in_progress(&peer_id).await {
+            info!("Connection to {} already in progress", peer_id);
+            return None;
+        }
+        
+        // Mark connection attempt
+        self.mark_connection_in_progress(&peer_id).await;
+        
+        Some(peer_id)
+    }
+    
+    /// Extract peer ID from device name (compatible with iOS/Android format)
+    fn extract_peer_id(&self, device_name: &str) -> Option<String> {
+        // iOS/Android use 8-character peer IDs as device names
+        if device_name.len() == 8 {
+            // Check if it's all hex characters
+            if device_name.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(device_name.to_uppercase())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Check if connection attempt is in progress
+    async fn is_connection_in_progress(&self, peer_id: &str) -> bool {
+        let connections = self.connections_in_progress.read().await;
+        let attempts = self.connection_attempts.read().await;
+        
+        if !connections.contains(peer_id) {
+            return false;
+        }
+        
+        // Check if attempt has timed out
+        if let Some(attempt) = attempts.get(peer_id) {
+            if attempt.started_at.elapsed() > Duration::from_secs(10) {
+                // Clean up expired attempt
+                drop(connections);
+                drop(attempts);
+                self.cleanup_expired_connection(peer_id).await;
+                return false;
             }
         }
         
-        Ok(())
+        true
     }
-
-    /// Start discovery monitoring task
-    async fn start_discovery_task(&self) -> Result<()> {
-        let adapter = self.adapter.as_ref()
-            .ok_or_else(|| anyhow!("No Bluetooth adapter available"))?;
+    
+    /// Mark connection as in progress
+    async fn mark_connection_in_progress(&self, peer_id: &str) {
+        let mut connections = self.connections_in_progress.write().await;
+        let mut attempts = self.connection_attempts.write().await;
         
-        let manager_clone = self.clone(); // You'll need to implement Clone
+        connections.insert(peer_id.to_string());
         
-        tokio::spawn(async move {
-            let mut events = adapter.events().await.unwrap();
+        let attempt = ConnectionAttempt {
+            started_at: Instant::now(),
+            retry_count: attempts.get(peer_id)
+                .map(|a| a.retry_count + 1)
+                .unwrap_or(1),
+        };
+        
+        attempts.insert(peer_id.to_string(), attempt.clone());
+        info!("Marked connection to {} as in progress (attempt {})", peer_id, attempt.retry_count);
+    }
+    
+    /// Mark connection as complete (success or failure)
+    pub async fn mark_connection_complete(&self, peer_id: &str) {
+        let mut connections = self.connections_in_progress.write().await;
+        connections.remove(peer_id);
+        info!("Marked connection to {} as complete", peer_id);
+        // Keep attempt record for retry logic
+    }
+    
+    /// Clean up expired connection attempt
+    async fn cleanup_expired_connection(&self, peer_id: &str) {
+        let mut connections = self.connections_in_progress.write().await;
+        connections.remove(peer_id);
+        warn!("Cleaned up expired connection attempt to {}", peer_id);
+    }
+    
+    /// Generate peer ID compatible with iOS/Android (8 hex characters)
+    pub fn generate_compatible_peer_id() -> String {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 4] = rng.gen();
+        hex::encode(bytes).to_uppercase()
+    }
+    
+    /// Create advertisement name compatible with iOS/Android
+    pub fn create_advertisement_name(&self) -> String {
+        // Use first 8 characters of peer ID as device name
+        // This matches the iOS/Android format
+        self.my_peer_id[..8.min(self.my_peer_id.len())].to_string()
+    }
+    
+    /// Determine if we should retry connection
+    pub async fn should_retry_connection(&self, peer_id: &str) -> bool {
+        let attempts = self.connection_attempts.read().await;
+        
+        if let Some(attempt) = attempts.get(peer_id) {
+            // Max 3 retries, exponential backoff
+            let max_retries = 3;
+            let backoff_duration = Duration::from_secs(2_u64.pow(attempt.retry_count.saturating_sub(1)));
             
-            while let Some(event) = events.next().await {
-                use btleplug::api::CentralEvent;
-                
-                match event {
-                    CentralEvent::DeviceDiscovered(id) => {
-                        if let Ok(peripheral) = adapter.peripheral(&id).await {
-                            let device_name = peripheral.properties().await
-                                .unwrap_or_default()
-                                .unwrap_or_default()
-                                .local_name;
-                            
-                            let rssi = peripheral.properties().await
-                                .unwrap_or_default()
-                                .unwrap_or_default()
-                                .rssi
-                                .unwrap_or(-100) as i8;
-                            
-                            if let Err(e) = manager_clone.handle_discovered_device_compatible(
-                                id.to_string(),
-                                device_name,
-                                rssi
-                            ).await {
-                                error!("Error handling discovered device: {}", e);
-                            }
-                        }
-                    }
-                    CentralEvent::DeviceDisconnected(id) => {
-                        // Handle disconnection
-                        if let Err(e) = manager_clone.handle_device_disconnected(
-                            id.to_string(),
-                            true // Assume error disconnect for now
-                        ).await {
-                            error!("Error handling device disconnection: {}", e);
-                        }
-                    }
-                    _ => {}
+            attempt.retry_count <= max_retries && 
+            attempt.started_at.elapsed() > backoff_duration
+        } else {
+            true
+        }
+    }
+    
+    /// Get retry delay for a peer
+    pub async fn get_retry_delay(&self, peer_id: &str) -> Duration {
+        let attempts = self.connection_attempts.read().await;
+        
+        if let Some(attempt) = attempts.get(peer_id) {
+            Duration::from_secs(2_u64.pow(attempt.retry_count.saturating_sub(1)))
+        } else {
+            Duration::from_secs(1)
+        }
+    }
+    
+    /// Clean up old discovered devices
+    pub async fn cleanup_old_discoveries(&self) {
+        let mut discovered = self.discovered_devices.write().await;
+        let cutoff = Instant::now() - Duration::from_secs(30);
+        
+        let before_count = discovered.len();
+        discovered.retain(|_, device| device.last_seen > cutoff);
+        let after_count = discovered.len();
+        
+        if before_count != after_count {
+            debug!("Cleaned up {} old discovered devices", before_count - after_count);
+        }
+    }
+    
+    /// Get connection debug info
+    pub async fn get_debug_info(&self) -> String {
+        let connections = self.connections_in_progress.read().await;
+        let attempts = self.connection_attempts.read().await;
+        let discovered = self.discovered_devices.read().await;
+        
+        let mut info = format!(
+            "iOS/Android Compatibility Manager:\n\
+             ===================================\n\
+             My Peer ID: {}\n\
+             Connections in Progress: {}\n\
+             Total Attempts: {}\n\
+             Discovered Devices: {}\n\
+             Connection Rule: Lower peer ID connects to higher\n\n",
+            self.my_peer_id,
+            connections.len(),
+            attempts.len(),
+            discovered.len()
+        );
+        
+        if !connections.is_empty() {
+            info.push_str("Connections in Progress:\n");
+            for peer_id in connections.iter() {
+                if let Some(attempt) = attempts.get(peer_id) {
+                    info.push_str(&format!("  - {}: attempt {}, {}s ago\n", 
+                                         peer_id, 
+                                         attempt.retry_count,
+                                         attempt.started_at.elapsed().as_secs()));
                 }
             }
-        });
-        
-        Ok(())
-    }
-
-    /// Start cleanup task for old discoveries and connections
-    async fn start_cleanup_task(&self) {
-        let compatibility = self.compatibility.clone();
-        
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-            
-            loop {
-                interval.tick().await;
-                
-                if let Some(ref compat) = compatibility {
-                    compat.cleanup_old_discoveries().await;
-                }
-            }
-        });
-    }
-
-    /// Placeholder for actual BLE advertising implementation
-    async fn start_advertising_with_name(&self, _name: &str) -> Result<()> {
-        // TODO: Implement actual BLE advertising with btleplug
-        // This will depend on your specific btleplug setup
-        warn!("BLE advertising not yet implemented - placeholder");
-        Ok(())
-    }
-
-    /// Placeholder for actual BLE connection implementation
-    async fn connect_to_device(&self, _device_id: &str) -> Result<()> {
-        // TODO: Implement actual BLE connection with btleplug
-        // This will depend on your specific btleplug setup
-        warn!("BLE connection not yet implemented - placeholder");
-        Ok(())
-    }
-
-    /// Get debug info including compatibility status
-    pub async fn get_debug_info_with_compatibility(&self) -> String {
-        let mut info = String::new();
-        
-        info.push_str("Bluetooth Connection Manager Debug\n");
-        info.push_str("==================================\n\n");
-        
-        // Basic info
-        info.push_str(&format!("Peer ID: {}\n", self.config.peer_id));
-        info.push_str(&format!("Scanning: {}\n", *self.scanning.read().await));
-        info.push_str(&format!("Advertising: {}\n", *self.advertising.read().await));
-        
-        // Connected peers
-        let peers = self.connected_peers.read().await;
-        info.push_str(&format!("Connected Peers: {}\n", peers.len()));
-        for (peer_id, peer) in peers.iter() {
-            info.push_str(&format!("  - {}: connected {}s ago\n", 
-                                 peer_id, 
-                                 peer.connected_at.elapsed().as_secs()));
+            info.push('\n');
         }
         
-        info.push_str("\n");
-        
-        // Compatibility info
-        if let Some(compatibility) = &self.compatibility {
-            info.push_str(&compatibility.get_debug_info().await);
+        if !discovered.is_empty() {
+            info.push_str("Recently Discovered:\n");
+            for (device_id, device) in discovered.iter() {
+                info.push_str(&format!("  - {}: {} (RSSI: {}, {}s ago)\n",
+                                     device.peer_id,
+                                     device_id,
+                                     device.rssi,
+                                     device.last_seen.elapsed().as_secs()));
+            }
         }
         
         info
     }
-
+    
     /// Get the peer ID
     pub fn get_peer_id(&self) -> &str {
-        &self.config.peer_id
-    }
-
-    /// Get connected peers count
-    pub async fn get_connected_count(&self) -> usize {
-        self.connected_peers.read().await.len()
-    }
-
-    /// Broadcast a message to all connected peers
-    pub async fn broadcast_message(&self, _data: &[u8]) -> Result<()> {
-        // TODO: Implement message broadcasting
-        warn!("Message broadcasting not yet implemented - placeholder");
-        Ok(())
+        &self.my_peer_id
     }
 }
-
-// TODO: Implement Clone for BluetoothConnectionManager if needed for retry logic
-// This might require using Arc for internal state

@@ -5,16 +5,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
-use anyhow::Result;
 
 /// Compatibility manager that makes Rust devices work with existing iOS/Android implementations
+#[derive(Clone)]
 pub struct CompatibilityManager {
     my_peer_id: String,
-    connections_in_progress: RwLock<HashSet<String>>,
-    connection_attempts: RwLock<HashMap<String, ConnectionAttempt>>,
-    discovered_devices: RwLock<HashMap<String, DiscoveredDevice>>,
+    connections_in_progress: Arc<RwLock<HashSet<String>>>,
+    connection_attempts: Arc<RwLock<HashMap<String, ConnectionAttempt>>>,
+    discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
 }
 
 #[derive(Clone)]
@@ -36,9 +37,9 @@ impl CompatibilityManager {
         info!("Initializing compatibility manager with peer ID: {}", my_peer_id);
         Self {
             my_peer_id,
-            connections_in_progress: RwLock::new(HashSet::new()),
-            connection_attempts: RwLock::new(HashMap::new()),
-            discovered_devices: RwLock::new(HashMap::new()),
+            connections_in_progress: Arc::new(RwLock::new(HashSet::new())),
+            connection_attempts: Arc::new(RwLock::new(HashMap::new())),
+            discovered_devices: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
@@ -169,7 +170,7 @@ impl CompatibilityManager {
                 .unwrap_or(1),
         };
         
-        attempts.insert(peer_id.to_string(), attempt);
+        attempts.insert(peer_id.to_string(), attempt.clone());
         info!("Marked connection to {} as in progress (attempt {})", peer_id, attempt.retry_count);
     }
     
@@ -251,8 +252,8 @@ impl CompatibilityManager {
         let discovered = self.discovered_devices.read().await;
         
         let mut info = format!(
-            "Compatibility Manager Debug:\n\
-             ============================\n\
+            "iOS/Android Compatibility Manager:\n\
+             ===================================\n\
              My Peer ID: {}\n\
              Connections in Progress: {}\n\
              Total Attempts: {}\n\

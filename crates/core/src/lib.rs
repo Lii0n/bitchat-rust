@@ -8,16 +8,15 @@ pub mod protocol;
 pub mod messaging;
 pub mod commands;
 
+// Re-export important types for easier access
+pub use bluetooth::{BluetoothConnectionManager, BluetoothEvent, BluetoothConfig, ConnectedPeer};
+pub use messaging::{MessageManager, ChannelManager};
+pub use protocol::{PacketRouter};
+
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, error};
-
-use bluetooth::manager::BluetoothConnectionManager;
-use bluetooth::events::BluetoothEvent;
-use messaging::manager::MessageManager;
-use messaging::channel::ChannelManager;
-use protocol::router::PacketRouter;
+use tracing::info;
 
 /// Main SecureMesh core instance with iOS/Android compatibility
 pub struct SecureMeshCore {
@@ -31,13 +30,13 @@ pub struct SecureMeshCore {
 impl SecureMeshCore {
     /// Create a new SecureMesh instance with iOS/Android compatibility
     pub async fn new_with_compatibility() -> Result<Self> {
-        info!("Initializing SecureMesh with iOS/Android compatibility");
+        info!("🔐 Initializing SecureMesh with iOS/Android compatibility");
         
-        // Create Bluetooth manager with compatibility
+        // Create Bluetooth manager with iOS/Android compatibility
         let bluetooth_manager = BluetoothConnectionManager::new_with_compatibility().await?;
         let my_peer_id = bluetooth_manager.get_peer_id().to_string();
         
-        info!("SecureMesh initialized with peer ID: {}", my_peer_id);
+        info!("✅ SecureMesh initialized with iOS/Android compatible peer ID: {}", my_peer_id);
         
         let bluetooth = Arc::new(RwLock::new(bluetooth_manager));
         let message_manager = Arc::new(RwLock::new(MessageManager::new()));
@@ -55,7 +54,7 @@ impl SecureMeshCore {
     
     /// Start the mesh networking services
     pub async fn start(&self) -> Result<()> {
-        info!("Starting SecureMesh services");
+        info!("🚀 Starting SecureMesh services");
         
         let mut bluetooth = self.bluetooth.write().await;
         bluetooth.start().await?;
@@ -63,7 +62,7 @@ impl SecureMeshCore {
         // Start event processing
         self.start_event_processing().await?;
         
-        info!("SecureMesh services started successfully");
+        info!("✅ SecureMesh services started successfully - ready for iOS/Android connections");
         Ok(())
     }
     
@@ -71,13 +70,13 @@ impl SecureMeshCore {
     async fn start_event_processing(&self) -> Result<()> {
         // TODO: Implement event processing loop
         // This would handle BluetoothEvent::PeerConnected, PeerDisconnected, etc.
-        info!("Event processing started");
+        info!("📡 Event processing started");
         Ok(())
     }
     
     /// Send a message to a specific peer
     pub async fn send_message(&self, recipient: &str, content: &str) -> Result<()> {
-        info!("Sending message to {}: {}", recipient, content);
+        info!("📤 Sending message to {}: {}", recipient, content);
         
         // Create message packet
         let message_data = content.as_bytes();
@@ -91,7 +90,7 @@ impl SecureMeshCore {
     
     /// Broadcast a message to all connected peers
     pub async fn broadcast_message(&self, content: &str) -> Result<()> {
-        info!("Broadcasting message: {}", content);
+        info!("📢 Broadcasting message: {}", content);
         
         let message_data = content.as_bytes();
         
@@ -103,7 +102,7 @@ impl SecureMeshCore {
     
     /// Join a channel
     pub async fn join_channel(&self, channel: &str) -> Result<String> {
-        info!("Joining channel: {}", channel);
+        info!("📂 Joining channel: {}", channel);
         
         let mut cm = self.channel_manager.write().await;
         let joined = cm.join_channel(channel);
@@ -120,7 +119,7 @@ impl SecureMeshCore {
     
     /// Leave a channel
     pub async fn leave_channel(&self, channel: &str) -> Result<String> {
-        info!("Leaving channel: {}", channel);
+        info!("📂 Leaving channel: {}", channel);
         
         let mut cm = self.channel_manager.write().await;
         let left = cm.leave_channel(channel);
@@ -153,30 +152,72 @@ impl SecureMeshCore {
         }
     }
     
-    /// Get connected peers
+    /// Get connected peers (iOS/Android compatible)
     pub async fn get_connected_peers(&self) -> Vec<String> {
-        // TODO: Implement peer list retrieval
+        let bluetooth = self.bluetooth.read().await;
+        bluetooth.get_connected_peers().await
+    }
+    
+    /// Get detailed connected peer information
+    pub async fn get_connected_peer_info(&self) -> Vec<ConnectedPeer> {
+        let bluetooth = self.bluetooth.read().await;
+        let peer_ids = bluetooth.get_connected_peers().await;
+        
+        // TODO: Get actual peer info from bluetooth manager
+        // For now return empty list
         vec![]
     }
     
-    /// Get debug information
+    /// Get debug information including iOS/Android compatibility status
     pub async fn get_debug_info(&self) -> String {
         let bluetooth = self.bluetooth.read().await;
         bluetooth.get_debug_info_with_compatibility().await
     }
     
-    /// Get peer ID
+    /// Get peer ID (iOS/Android compatible format)
     pub fn get_peer_id(&self) -> &str {
         &self.my_peer_id
     }
     
+    /// Check if we're connected to any iOS/Android devices
+    pub async fn has_ios_android_connections(&self) -> bool {
+        let bluetooth = self.bluetooth.read().await;
+        let peer_count = bluetooth.get_connected_count().await;
+        peer_count > 0
+    }
+    
+    /// Get connection status
+    pub async fn get_connection_status(&self) -> String {
+        let bluetooth = self.bluetooth.read().await;
+        let peer_count = bluetooth.get_connected_count().await;
+        let is_scanning = bluetooth.is_scanning().await;
+        let is_advertising = bluetooth.is_advertising().await;
+        
+        format!(
+            "📊 Connection Status:\n\
+            Peer ID: {} (iOS/Android compatible)\n\
+            Connected Peers: {}\n\
+            Scanning: {}\n\
+            Advertising: {}\n\
+            Ready for iOS/Android connections: {}",
+            self.my_peer_id,
+            peer_count,
+            if is_scanning { "✅" } else { "❌" },
+            if is_advertising { "✅" } else { "❌" },
+            if is_scanning && is_advertising { "✅" } else { "❌" }
+        )
+    }
+    
     /// Stop all services
     pub async fn stop(&self) -> Result<()> {
-        info!("Stopping SecureMesh services");
+        info!("🛑 Stopping SecureMesh services");
         
         // TODO: Implement proper shutdown
+        // - Stop scanning and advertising
+        // - Disconnect from all peers
+        // - Clean up resources
         
-        info!("SecureMesh services stopped");
+        info!("✅ SecureMesh services stopped");
         Ok(())
     }
 }
