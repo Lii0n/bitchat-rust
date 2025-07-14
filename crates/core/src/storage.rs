@@ -1,157 +1,102 @@
 ﻿use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::fs;
-use crate::{Message, Peer};
 
-/// Storage manager for BitChat data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredMessage {
+    pub id: String,
+    pub sender_id: String,
+    pub content: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub channel: Option<String>,
+}
+
+#[derive(Debug)]
 pub struct Storage {
-    pub data_dir: PathBuf,
+    data_dir: PathBuf,
+    messages_file: PathBuf,
+    peers_file: PathBuf,
 }
 
 impl Storage {
-    pub fn new(data_dir: &Path) -> Result<Self> {
+    pub fn new(data_dir: &str) -> Result<Self> {
+        let data_dir = PathBuf::from(data_dir);
+        let messages_file = data_dir.join("messages.json");
+        let peers_file = data_dir.join("peers.json");
+
         // Create data directory if it doesn't exist
-        if !data_dir.exists() {
-            fs::create_dir_all(data_dir)?;
-        }
+        std::fs::create_dir_all(&data_dir)?;
 
         Ok(Self {
-            data_dir: data_dir.to_path_buf(),
+            data_dir,
+            messages_file,
+            peers_file,
         })
     }
 
-    /// Save a message to storage
-    pub fn save_message(&self, message: &Message) -> Result<()> {
-        let messages_dir = self.data_dir.join("messages");
-        if !messages_dir.exists() {
-            fs::create_dir_all(&messages_dir)?;
-        }
-
-        let message_file = messages_dir.join(format!("{}.json", message.id));
-        let json = serde_json::to_string_pretty(message)?;
-        fs::write(message_file, json)?;
-
-        Ok(())
+    pub fn store_message(&self, message: StoredMessage) -> Result<()> {
+        let mut messages = self.load_messages().unwrap_or_default();
+        messages.insert(message.id.clone(), message);
+        self.save_messages(&messages)
     }
 
-    /// Load all messages from storage
-    pub fn load_messages(&self) -> Result<Vec<Message>> {
-        let messages_dir = self.data_dir.join("messages");
-        if !messages_dir.exists() {
-            return Ok(Vec::new());
+    pub fn load_messages(&self) -> Result<HashMap<String, StoredMessage>> {
+        if !self.messages_file.exists() {
+            return Ok(HashMap::new());
         }
 
-        let mut messages = Vec::new();
-        for entry in fs::read_dir(&messages_dir)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                let content = fs::read_to_string(entry.path())?;
-                if let Ok(message) = serde_json::from_str::<Message>(&content) {
-                    messages.push(message);
-                }
-            }
-        }
-
-        // Sort by timestamp
-        messages.sort_by_key(|m| m.timestamp);
+        let content = std::fs::read_to_string(&self.messages_file)?;
+        let messages: HashMap<String, StoredMessage> = serde_json::from_str(&content)?;
         Ok(messages)
     }
 
-    /// Save peer information
-    pub fn save_peer(&self, peer: &Peer) -> Result<()> {
-        let peers_dir = self.data_dir.join("peers");
-        if !peers_dir.exists() {
-            fs::create_dir_all(&peers_dir)?;
-        }
-
-        let peer_file = peers_dir.join(format!("{}.json", peer.id));
-        let json = serde_json::to_string_pretty(peer)?;
-        fs::write(peer_file, json)?;
-
+    fn save_messages(&self, messages: &HashMap<String, StoredMessage>) -> Result<()> {
+        let content = serde_json::to_string_pretty(messages)?;
+        std::fs::write(&self.messages_file, content)?;
         Ok(())
     }
 
-    /// Load all known peers
-    pub fn load_peers(&self) -> Result<Vec<Peer>> {
-        let peers_dir = self.data_dir.join("peers");
-        if !peers_dir.exists() {
-            return Ok(Vec::new());
+    pub fn get_messages_for_channel(&self, channel: Option<&str>) -> Result<Vec<StoredMessage>> {
+        let messages = self.load_messages()?;
+        let filtered: Vec<StoredMessage> = messages
+            .values()
+            .filter(|msg| msg.channel.as_deref() == channel)
+            .cloned()
+            .collect();
+        Ok(filtered)
+    }
+
+    pub fn clear_messages(&self) -> Result<()> {
+        if self.messages_file.exists() {
+            std::fs::remove_file(&self.messages_file)?;
+        }
+        Ok(())
+    }
+
+    pub fn store_peer_info(&self, peer_id: &str, nickname: &str) -> Result<()> {
+        let mut peers = self.load_peer_info().unwrap_or_default();
+        peers.insert(peer_id.to_string(), nickname.to_string());
+        self.save_peer_info(&peers)
+    }
+
+    pub fn load_peer_info(&self) -> Result<HashMap<String, String>> {
+        if !self.peers_file.exists() {
+            return Ok(HashMap::new());
         }
 
-        let mut peers = Vec::new();
-        for entry in fs::read_dir(&peers_dir)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                let content = fs::read_to_string(entry.path())?;
-                if let Ok(peer) = serde_json::from_str::<Peer>(&content) {
-                    peers.push(peer);
-                }
-            }
-        }
-
+        let content = std::fs::read_to_string(&self.peers_file)?;
+        let peers: HashMap<String, String> = serde_json::from_str(&content)?;
         Ok(peers)
     }
 
-    /// Clear all stored data
-    pub fn clear_all(&self) -> Result<()> {
-        if self.data_dir.exists() {
-            fs::remove_dir_all(&self.data_dir)?;
-            fs::create_dir_all(&self.data_dir)?;
-        }
+    fn save_peer_info(&self, peers: &HashMap<String, String>) -> Result<()> {
+        let content = serde_json::to_string_pretty(peers)?;
+        std::fs::write(&self.peers_file, content)?;
         Ok(())
     }
 
-    /// Get storage statistics
-    pub fn get_stats(&self) -> Result<StorageStats> {
-        let messages_count = self.count_files_in_dir("messages")?;
-        let peers_count = self.count_files_in_dir("peers")?;
-        
-        Ok(StorageStats {
-            messages_count,
-            peers_count,
-            data_dir_size: self.calculate_dir_size(&self.data_dir)?,
-        })
+    pub fn get_data_dir(&self) -> &Path {
+        &self.data_dir
     }
-
-    fn count_files_in_dir(&self, subdir: &str) -> Result<usize> {
-        let dir = self.data_dir.join(subdir);
-        if !dir.exists() {
-            return Ok(0);
-        }
-
-        let mut count = 0;
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
-    fn calculate_dir_size(&self, dir: &Path) -> Result<u64> {
-        let mut size = 0;
-        if !dir.exists() {
-            return Ok(0);
-        }
-
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                size += entry.metadata()?.len();
-            } else if path.is_dir() {
-                size += self.calculate_dir_size(&path)?;
-            }
-        }
-        Ok(size)
-    }
-}
-
-/// Storage statistics
-#[derive(Debug)]
-pub struct StorageStats {
-    pub messages_count: usize,
-    pub peers_count: usize,
-    pub data_dir_size: u64,
 }

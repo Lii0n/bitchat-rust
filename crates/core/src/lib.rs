@@ -1,53 +1,69 @@
-﻿// crates/core/src/lib.rs
-//! BitChat Core Library
-//! 
-//! This is the core library for BitChat, providing cryptographic, networking,
-//! and protocol functionality for secure peer-to-peer messaging.
-
-// Core modules
-pub mod constants;
+﻿pub mod config;
 pub mod crypto;
+pub mod storage;
 pub mod protocol;
-pub mod channel;
 pub mod commands;
-pub mod config;
 
-// Optional modules based on features
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth;
 
-// Re-export commonly used types
-pub use crypto::CryptoManager;
-pub use protocol::packet::{BitchatPacket, MessageType};
-pub use protocol::binary::BinaryProtocolManager;
-pub use channel::{ChannelManager, ChannelInfo};
-pub use commands::{CommandProcessor, BitchatCommand, CommandResult};
+// Re-export main types
 pub use config::Config;
+pub use crypto::CryptoManager;
+pub use storage::Storage;
+pub use protocol::{BitchatPacket, MessageType, BinaryProtocolManager};
 
 #[cfg(feature = "bluetooth")]
-pub use bluetooth::{BluetoothEvent, BluetoothConfig, BluetoothManager, CompatibilityManager};
+pub use bluetooth::{BluetoothManager, BluetoothConfig, BluetoothEvent};
 
-// Configuration and core types
-use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use anyhow::Result;
 
-/// Storage abstraction
-#[derive(Debug, Clone)]
-pub struct Storage {
-    data_dir: String,
+/// Channel management
+#[derive(Debug)]
+pub struct ChannelManager {
+    channels: std::collections::HashMap<String, Channel>,
 }
 
-impl Storage {
-    pub fn new(data_dir: &str) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(data_dir)?;
-        Ok(Self {
-            data_dir: data_dir.to_string(),
-        })
+#[derive(Debug, Clone)]
+pub struct Channel {
+    pub name: String,
+    pub password: Option<String>,
+    pub members: std::collections::HashSet<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ChannelManager {
+    pub fn new() -> Self {
+        Self {
+            channels: std::collections::HashMap::new(),
+        }
     }
     
-    pub fn data_dir(&self) -> &str {
-        &self.data_dir
+    pub fn create_channel(&mut self, name: String, password: Option<String>) -> Result<()> {
+        let channel = Channel {
+            name: name.clone(),
+            password,
+            members: std::collections::HashSet::new(),
+            created_at: chrono::Utc::now(),
+        };
+        self.channels.insert(name, channel);
+        Ok(())
+    }
+    
+    pub fn join_channel(&mut self, channel_name: &str, peer_id: String) -> Result<()> {
+        if let Some(channel) = self.channels.get_mut(channel_name) {
+            channel.members.insert(peer_id);
+        }
+        Ok(())
+    }
+    
+    pub fn leave_channel(&mut self, channel_name: &str, peer_id: &str) -> Result<()> {
+        if let Some(channel) = self.channels.get_mut(channel_name) {
+            channel.members.remove(peer_id);
+        }
+        Ok(())
     }
 }
 
@@ -61,8 +77,8 @@ pub struct PeerManager {
 pub struct PeerInfo {
     pub peer_id: [u8; 8],
     pub nickname: Option<String>,
-    pub last_seen: u64,
-    pub connection_count: u32,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub public_key: Option<Vec<u8>>,
 }
 
 impl PeerManager {
@@ -73,24 +89,32 @@ impl PeerManager {
     }
     
     pub fn add_peer(&mut self, peer_id: [u8; 8], nickname: Option<String>) {
-        let info = PeerInfo {
+        let peer_info = PeerInfo {
             peer_id,
             nickname,
-            last_seen: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            connection_count: 1,
+            last_seen: chrono::Utc::now(),
+            public_key: None,
         };
-        self.peers.insert(peer_id, info);
+        self.peers.insert(peer_id, peer_info);
     }
     
-    pub fn get_peers(&self) -> Vec<&PeerInfo> {
-        self.peers.values().collect()
+    pub fn get_peer(&self, peer_id: &[u8; 8]) -> Option<&PeerInfo> {
+        self.peers.get(peer_id)
+    }
+    
+    pub fn update_peer_nickname(&mut self, peer_id: &[u8; 8], nickname: String) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.nickname = Some(nickname);
+            peer.last_seen = chrono::Utc::now();
+        }
     }
     
     pub fn remove_peer(&mut self, peer_id: &[u8; 8]) -> bool {
         self.peers.remove(peer_id).is_some()
+    }
+    
+    pub fn get_all_peers(&self) -> Vec<&PeerInfo> {
+        self.peers.values().collect()
     }
 }
 
@@ -172,7 +196,7 @@ impl BitchatCore {
         let bluetooth = {
             let bluetooth_config = BluetoothConfig::default()
                 .with_device_name(config.device_name.clone());
-            let (bluetooth_manager, _receiver) = BluetoothManager::with_config(bluetooth_config).await?;
+            let bluetooth_manager = BluetoothManager::with_config(bluetooth_config).await?;
             Arc::new(Mutex::new(bluetooth_manager))
         };
         
@@ -192,4 +216,79 @@ impl BitchatCore {
     pub fn get_peer_id(&self) -> [u8; 8] {
         self.my_peer_id
     }
+    
+    #[cfg(feature = "bluetooth")]
+    pub async fn start_bluetooth(&self) -> Result<()> {
+        use tracing::info;
+        
+        let bluetooth_manager = self.bluetooth.lock().await;
+        let bluetooth_manager_clone = Arc::new(bluetooth_manager.clone());
+        
+        // Start the Bluetooth manager in a separate task
+        tokio::spawn(async move {
+            if let Err(e) = bluetooth_manager_clone.start().await {
+                tracing::error!("Bluetooth manager failed: {}", e);
+            }
+        });
+        
+        info!("Bluetooth manager started");
+        Ok(())
+    }
+    
+    #[cfg(feature = "bluetooth")]
+    pub async fn stop_bluetooth(&self) -> Result<()> {
+        let bluetooth = self.bluetooth.lock().await;
+        bluetooth.stop().await?;
+        Ok(())
+    }
+    
+    #[cfg(feature = "bluetooth")]
+    pub async fn send_message(&self, content: &str) -> Result<()> {
+        let packet = BinaryProtocolManager::create_message_packet(
+            self.my_peer_id,
+            None, // Broadcast
+            content,
+        )?;
+        
+        let data = BinaryProtocolManager::encode(&packet)?;
+        let bluetooth = self.bluetooth.lock().await;
+        bluetooth.broadcast_message(&data).await?;
+        Ok(())
+    }
+    
+    #[cfg(feature = "bluetooth")]
+    pub async fn start_bluetooth_with_delegate<D: BitchatBluetoothDelegate + Send + Sync + 'static>(
+        &self, 
+        delegate: Arc<D>
+    ) -> Result<()> {
+        use tracing::info;
+        
+        // Set the delegate in the bluetooth manager
+        {
+            let mut bluetooth_manager = self.bluetooth.lock().await;
+            bluetooth_manager.set_delegate(delegate);
+        }
+        
+        let bluetooth_manager = self.bluetooth.lock().await;
+        let bluetooth_manager_clone = Arc::new(bluetooth_manager.clone());
+        
+        // Start the Bluetooth manager in a separate task
+        tokio::spawn(async move {
+            if let Err(e) = bluetooth_manager_clone.start().await {
+                tracing::error!("Bluetooth manager failed: {}", e);
+            }
+        });
+        
+        info!("Bluetooth manager started with delegate");
+        Ok(())
+    }
+}
+
+// Delegate trait for handling Bluetooth events  
+pub trait BitchatBluetoothDelegate {
+    fn on_device_discovered(&self, device_id: &str, device_name: Option<&str>, rssi: i8);
+    fn on_device_connected(&self, device_id: &str, peer_id: &str);
+    fn on_device_disconnected(&self, device_id: &str, peer_id: &str);
+    fn on_message_received(&self, from_peer: &str, data: &[u8]);
+    fn on_error(&self, message: &str);
 }

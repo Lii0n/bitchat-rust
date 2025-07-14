@@ -1,130 +1,130 @@
-﻿//! BitChat Desktop Application
+﻿use bitchat_core::{BitchatCore, Config};
+use eframe::egui;
+use std::path::PathBuf;
 
-use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use bitchat_core::{
-    BitchatCore, Config, CommandProcessor, BitchatCommand, CommandResult,
-};
-
-async fn print_stats(processor: &Arc<CommandProcessor>) {
-    println!("📊 === BitChat Desktop Statistics ===");
-    
-    if let Ok(CommandResult::PeerList { peers }) = processor.process_command(BitchatCommand::ListPeers).await {
-        println!("👥 Connected Peers: {}", peers.len());
-        for peer in peers.iter().take(5) {
-            println!("   - {}", peer);
-        }
-        if peers.len() > 5 {
-            println!("   ... and {} more", peers.len() - 5);
-        }
-    }
-    
-    if let Ok(CommandResult::ChannelList { channels }) = processor.process_command(BitchatCommand::ListChannels).await {
-        println!("💬 Joined Channels: {}", channels.len());
-        for channel in channels {
-            println!("   - #{}", channel);
-        }
-    }
-    
-    println!("==========================================\n");
+#[derive(Default)]
+struct BitChatApp {
+    message_input: String,
+    messages: Vec<String>,
+    connected_peers: Vec<String>,
+    core: Option<BitchatCore>,
 }
 
-async fn send_heartbeat(processor: &Arc<CommandProcessor>) {
-    let heartbeat_msg = format!("Desktop heartbeat - {}", chrono::Utc::now().format("%H:%M:%S"));
-    match processor.process_command(BitchatCommand::Message {
-        content: heartbeat_msg,
-        channel: Some("general".to_string()),
-        recipient: None,
-    }).await {
-        Ok(_) => println!("💓 Heartbeat sent to network"),
-        Err(e) => println!("❌ Failed to send heartbeat: {}", e),
+impl BitChatApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        Self::default()
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+impl eframe::App for BitChatApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("🔐 BitChat Desktop");
+            
+            ui.separator();
+            
+            // Connection status
+            ui.horizontal(|ui| {
+                ui.label("Status:");
+                if self.core.is_some() {
+                    ui.colored_label(egui::Color32::GREEN, "Connected");
+                } else {
+                    ui.colored_label(egui::Color32::RED, "Disconnected");
+                }
+            });
+            
+            ui.separator();
+            
+            // Peers list
+            ui.heading("Connected Peers");
+            egui::ScrollArea::vertical()
+                .max_height(100.0)
+                .show(ui, |ui| {
+                    if self.connected_peers.is_empty() {
+                        ui.label("No connected peers");
+                    } else {
+                        for peer in &self.connected_peers {
+                            ui.label(format!("🔗 {}", peer));
+                        }
+                    }
+                });
+            
+            ui.separator();
+            
+            // Messages area
+            ui.heading("Messages");
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for message in &self.messages {
+                        ui.label(message);
+                    }
+                });
+            
+            ui.separator();
+            
+            // Message input
+            ui.horizontal(|ui| {
+                let text_edit = egui::TextEdit::singleline(&mut self.message_input)
+                    .hint_text("Type a message...")
+                    .desired_width(ui.available_width() - 100.0);
+                
+                let response = ui.add(text_edit);
+                
+                let send_button = ui.button("Send");
+                
+                if (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) 
+                    || send_button.clicked() {
+                    if !self.message_input.trim().is_empty() {
+                        let message = self.message_input.clone();
+                        self.messages.push(format!("You: {}", message));
+                        self.message_input.clear();
+                        
+                        // TODO: Send message through BitChat core
+                    }
+                }
+            });
+            
+            ui.separator();
+            
+            // Control buttons
+            ui.horizontal(|ui| {
+                if ui.button("Start BitChat").clicked() {
+                    // TODO: Initialize BitChat core
+                    self.messages.push("BitChat starting...".to_string());
+                }
+                
+                if ui.button("Stop BitChat").clicked() {
+                    self.core = None;
+                    self.messages.push("BitChat stopped".to_string());
+                }
+                
+                if ui.button("Clear Messages").clicked() {
+                    self.messages.clear();
+                }
+            });
+        });
+        
+        // Request repaint for real-time updates
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    // Initialize tracing
     tracing_subscriber::fmt::init();
-
-    println!("🖥️  BitChat Desktop v1.0.0");
-    println!("Starting desktop application...\n");
-
-    let mut config = Config::default();
-    config.max_peers = 50;
-    config.scan_interval_ms = 3000;
     
-    println!("📡 Device Name: {}", config.device_name);
-    println!("💾 Data Directory: {}\n", config.data_dir.display());
-
-    let core = BitchatCore::new(config).await?;
-    let my_peer_id = core.get_peer_id();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 600.0])
+            .with_min_inner_size([400.0, 300.0]),
+        ..Default::default()
+    };
     
-    println!("🆔 Peer ID: {}", hex::encode(my_peer_id));
-    println!("🔄 Starting BitChat services...\n");
-    
-    // Start Bluetooth manager
-    #[cfg(feature = "bluetooth")]
-    {
-        let bluetooth = core.bluetooth.lock().await;
-        bluetooth.start().await?;
-        println!("📡 Bluetooth manager started - scanning for peers...");
-    }
-
-    let processor = Arc::new({
-        #[cfg(feature = "bluetooth")]
-        {
-            CommandProcessor::new(
-                core.bluetooth.clone(),
-                Arc::new(Mutex::new(core.crypto)),
-                Arc::new(core.storage),
-                Arc::new(core.config),
-                core.packet_router.clone(),
-                core.channel_manager.clone(),
-                my_peer_id,
-            )
-        }
-        #[cfg(not(feature = "bluetooth"))]
-        {
-            CommandProcessor::new(
-                Arc::new(Mutex::new(core.crypto)),
-                Arc::new(core.storage),
-                Arc::new(core.config),
-                core.packet_router.clone(),
-                core.channel_manager.clone(),
-                my_peer_id,
-            )
-        }
-    });
-
-    println!("✅ BitChat Desktop ready!");
-
-    // Auto-join general channel
-    if let Ok(CommandResult::Success { message }) = processor.process_command(BitchatCommand::Join {
-        channel: "general".to_string(),
-        password: None,
-    }).await {
-        println!("🔗 {}", message);
-    }
-
-    if let Ok(CommandResult::Success { message }) = processor.process_command(BitchatCommand::SetNickname {
-        nickname: format!("Desktop-{}", &hex::encode(my_peer_id)[..4]),
-    }).await {
-        println!("👤 {}", message);
-    }
-
-    let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-    let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-
-    loop {
-        tokio::select! {
-            _ = stats_interval.tick() => print_stats(&processor).await,
-            _ = heartbeat_interval.tick() => send_heartbeat(&processor).await,
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n📡 Shutting down...");
-                break;
-            }
-        }
-    }
-
-    Ok(())
+    eframe::run_native(
+        "BitChat Desktop",
+        options,
+        Box::new(|cc| Box::new(BitChatApp::new(cc))),
+    )
 }

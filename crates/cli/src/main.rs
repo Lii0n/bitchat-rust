@@ -1,218 +1,260 @@
-﻿//! BitChat CLI Application
-
-use anyhow::Result;
-use std::io::{self, Write};
+﻿use bitchat_core::{BitchatCore, Config, BitchatBluetoothDelegate};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
-use bitchat_core::{
-    BitchatCore, Config, CommandProcessor, BitchatCommand, CommandResult,
-};
+use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tracing::info;
 
-/// Print help information
-fn print_help() {
-    println!("📚 BitChat Commands:");
-    println!("  /join <channel> [password]  - Join a channel");
-    println!("  /leave <channel>            - Leave a channel");
-    println!("  /say <channel> <message>    - Send message to channel");
-    println!("  /msg <peer> <message>       - Send private message");
-    println!("  /broadcast <message>        - Send public broadcast");
-    println!("  /peers                      - List connected peers");
-    println!("  /channels                   - List joined channels");
-    println!("  /nick <nickname>            - Set your nickname");
-    println!("  /help                       - Show this help");
-    println!("  /quit                       - Exit BitChat");
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Device name (will be used as peer ID)
+    #[arg(short, long, default_value = "RustBitChat")]
+    device_name: String,
+    
+    /// Data directory
+    #[arg(short, long)]
+    data_dir: Option<PathBuf>,
+    
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-/// Parse user input into BitchatCommand
-fn parse_command(input: &str) -> Result<BitchatCommand> {
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err(anyhow::anyhow!("Empty command"));
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the BitChat service
+    Start,
+    /// Send a test message
+    Send {
+        /// Message content
+        message: String,
+    },
+    /// Show connected peers
+    Peers,
+}
+
+// Simple delegate implementation for CLI
+struct CliDelegate;
+
+impl BitchatBluetoothDelegate for CliDelegate {
+    fn on_device_discovered(&self, device_id: &str, device_name: Option<&str>, rssi: i8) {
+        println!("📡 Discovered: {} ({:?}) RSSI: {}dBm", device_id, device_name, rssi);
     }
 
-    match parts[0] {
-        "/join" | "/j" => {
-            if parts.len() < 2 {
-                return Err(anyhow::anyhow!("Usage: /join <channel> [password]"));
+    fn on_device_connected(&self, device_id: &str, peer_id: &str) {
+        println!("🔗 Connected: {} (peer: {})", device_id, peer_id);
+    }
+
+    fn on_device_disconnected(&self, device_id: &str, peer_id: &str) {
+        println!("❌ Disconnected: {} (peer: {})", device_id, peer_id);
+    }
+
+    fn on_message_received(&self, from_peer: &str, data: &[u8]) {
+        if let Ok(packet) = bitchat_core::BinaryProtocolManager::decode(data) {
+            match packet.message_type {
+                bitchat_core::MessageType::Message => {
+                    if let Ok(content) = String::from_utf8(packet.payload) {
+                        println!("💬 {}: {}", from_peer, content);
+                    }
+                }
+                bitchat_core::MessageType::Announce => {
+                    if let Ok(nickname) = String::from_utf8(packet.payload) {
+                        println!("👋 {} announced as: {}", from_peer, nickname);
+                    }
+                }
+                _ => {
+                    println!("📦 Received {:?} from {}", packet.message_type, from_peer);
+                }
             }
-            let channel = parts[1].to_string();
-            let password = if parts.len() > 2 {
-                Some(parts[2..].join(" "))
-            } else {
-                None
-            };
-            Ok(BitchatCommand::Join { channel, password })
         }
-        "/leave" | "/l" => {
-            if parts.len() < 2 {
-                return Err(anyhow::anyhow!("Usage: /leave <channel>"));
-            }
-            let channel = parts[1].to_string();
-            Ok(BitchatCommand::Leave { channel })
-        }
-        "/msg" | "/message" => {
-            if parts.len() < 3 {
-                return Err(anyhow::anyhow!("Usage: /msg <recipient> <message>"));
-            }
-            let recipient = Some(parts[1].to_string());
-            let content = parts[2..].join(" ");
-            Ok(BitchatCommand::Message { 
-                content, 
-                channel: None, 
-                recipient 
-            })
-        }
-        "/say" => {
-            if parts.len() < 3 {
-                return Err(anyhow::anyhow!("Usage: /say <channel> <message>"));
-            }
-            let channel = Some(parts[1].to_string());
-            let content = parts[2..].join(" ");
-            Ok(BitchatCommand::Message { 
-                content, 
-                channel, 
-                recipient: None 
-            })
-        }
-        "/broadcast" | "/bc" => {
-            if parts.len() < 2 {
-                return Err(anyhow::anyhow!("Usage: /broadcast <message>"));
-            }
-            let content = parts[1..].join(" ");
-            Ok(BitchatCommand::Message { 
-                content, 
-                channel: None, 
-                recipient: None 
-            })
-        }
-        "/peers" | "/who" => Ok(BitchatCommand::ListPeers),
-        "/channels" | "/ch" => Ok(BitchatCommand::ListChannels),
-        "/nick" | "/nickname" => {
-            if parts.len() < 2 {
-                return Err(anyhow::anyhow!("Usage: /nick <nickname>"));
-            }
-            let nickname = parts[1..].join(" ");
-            Ok(BitchatCommand::SetNickname { nickname })
-        }
-        "/quit" | "/exit" | "/q" => Ok(BitchatCommand::Quit),
-        "/help" | "/h" => {
-            print_help();
-            Err(anyhow::anyhow!("Help displayed"))
-        }
-        _ => Err(anyhow::anyhow!("Unknown command: {}", parts[0]))
+    }
+
+    fn on_error(&self, message: &str) {
+        eprintln!("❌ Bluetooth error: {}", message);
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
+async fn main() -> anyhow::Result<()> {
+    // Initialize tracing
     tracing_subscriber::fmt::init();
-
-    println!("🔹 BitChat CLI v1.0.0");
-    println!("Type '/help' for commands or '/quit' to exit\n");
-
-    // Create configuration
-    let config = Config::default();
-    println!("📡 Device Name: {}", config.device_name);
-    println!("💾 Data Directory: {}\n", config.data_dir.display());
-
-    // Initialize BitChat core
-    let core = BitchatCore::new(config).await?;
-    let my_peer_id = core.get_peer_id();
     
-    println!("🆔 Peer ID: {}", hex::encode(my_peer_id));
-    println!("🔄 Starting BitChat services...\n");
-
-    // Create command processor
-    let processor = {
-        #[cfg(feature = "bluetooth")]
-        {
-            CommandProcessor::new(
-                core.bluetooth.clone(),
-                Arc::new(Mutex::new(core.crypto)),
-                Arc::new(core.storage),
-                Arc::new(core.config),
-                core.packet_router.clone(),
-                core.channel_manager.clone(),
-                my_peer_id,
-            )
-        }
-        #[cfg(not(feature = "bluetooth"))]
-        {
-            CommandProcessor::new(
-                Arc::new(Mutex::new(core.crypto)),
-                Arc::new(core.storage),
-                Arc::new(core.config),
-                core.packet_router.clone(),
-                core.channel_manager.clone(),
-                my_peer_id,
-            )
-        }
+    let cli = Cli::parse();
+    
+    // Create config
+    let data_dir = cli.data_dir.unwrap_or_else(|| {
+        dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("bitchat")
+    });
+    
+    let config = Config {
+        device_name: cli.device_name.clone(),
+        data_dir,
+        ..Default::default()
     };
-
-    println!("✅ BitChat ready! Available commands:");
-    print_help();
-    println!();
-
-    // Start command loop
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut line = String::new();
-
-    loop {
-        print!("> ");
-        io::stdout().flush()?;
-        
-        line.clear();
-        if reader.read_line(&mut line).await? == 0 {
-            break; // EOF
+    
+    info!("Starting BitChat with device name: {}", cli.device_name);
+    
+    // Create BitChat core
+    let core = BitchatCore::new(config).await?;
+    
+    match cli.command {
+        Some(Commands::Start) => {
+            start_interactive_mode(core).await?;
         }
-
-        let input = line.trim();
-        if input.is_empty() {
-            continue;
+        Some(Commands::Send { message }) => {
+            send_message(core, &message).await?;
         }
-
-        match parse_command(input) {
-            Ok(command) => match processor.process_command(command).await {
-                Ok(result) => handle_command_result(result),
-                Err(e) => println!("❌ Command failed: {}", e),
-            },
-            Err(e) => {
-                println!("❌ Invalid command: {}", e);
-                println!("💡 Type '/help' for usage information");
-            }
+        Some(Commands::Peers) => {
+            show_peers(core).await?;
+        }
+        None => {
+            start_interactive_mode(core).await?;
         }
     }
-
+    
     Ok(())
 }
 
-fn handle_command_result(result: CommandResult) {
-    match result {
-        CommandResult::Success { message } => println!("✅ {}", message),
-        CommandResult::Error { error } => println!("❌ {}", error),
-        CommandResult::PeerList { peers } => {
-            if peers.is_empty() {
-                println!("📋 No connected peers");
-            } else {
-                println!("📋 Connected peers:");
-                for peer in peers {
-                    println!("  - {}", peer);
+async fn start_interactive_mode(core: BitchatCore) -> anyhow::Result<()> {
+    println!("🚀 Starting BitChat in interactive mode");
+    println!("📱 Device: {}", core.config.device_name);
+    println!("🔑 Peer ID: {}", hex::encode(core.get_peer_id()));
+    println!();
+    
+    #[cfg(feature = "bluetooth")]
+    {
+        println!("🔵 Starting Bluetooth...");
+        let delegate = Arc::new(CliDelegate);
+        
+        if let Err(e) = core.start_bluetooth_with_delegate(delegate).await {
+            error!("Failed to start Bluetooth: {}", e);
+            println!("❌ Bluetooth not available: {}", e);
+            println!("💡 Make sure Bluetooth is enabled and you have permissions");
+        } else {
+            println!("✅ Bluetooth started successfully");
+        }
+    }
+    
+    #[cfg(not(feature = "bluetooth"))]
+    {
+        println!("⚠️  Bluetooth feature not enabled");
+    }
+    
+    println!();
+    println!("Commands:");
+    println!("  /send <message>  - Send a message");
+    println!("  /peers          - Show connected peers");
+    println!("  /quit           - Exit");
+    println!();
+    
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin);
+    let mut line = String::new();
+    
+    loop {
+        print!("bitchat> ");
+        line.clear();
+        
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let input = line.trim();
+                
+                if input.is_empty() {
+                    continue;
+                }
+                
+                if input == "/quit" || input == "/exit" {
+                    break;
+                } else if input == "/peers" {
+                    show_peers_inline(&core).await;
+                } else if let Some(message) = input.strip_prefix("/send ") {
+                    if let Err(e) = send_message_inline(&core, message).await {
+                        eprintln!("❌ Failed to send message: {}", e);
+                    }
+                } else if input.starts_with('/') {
+                    println!("❓ Unknown command: {}", input);
+                } else {
+                    // Treat as message
+                    if let Err(e) = send_message_inline(&core, input).await {
+                        eprintln!("❌ Failed to send message: {}", e);
+                    }
                 }
             }
-        }
-        CommandResult::ChannelList { channels } => {
-            if channels.is_empty() {
-                println!("📋 No joined channels");
-            } else {
-                println!("📋 Joined channels:");
-                for channel in channels {
-                    println!("  - #{}", channel);
-                }
+            Err(e) => {
+                eprintln!("❌ Error reading input: {}", e);
+                break;
             }
         }
-        CommandResult::Quit => println!("👋 Goodbye!"),
+    }
+    
+    println!("👋 Shutting down...");
+    
+    #[cfg(feature = "bluetooth")]
+    {
+        if let Err(e) = core.stop_bluetooth().await {
+            error!("Error stopping Bluetooth: {}", e);
+        }
+    }
+    
+    Ok(())
+}
+
+async fn send_message(core: BitchatCore, message: &str) -> anyhow::Result<()> {
+    println!("📤 Sending message: {}", message);
+    
+    #[cfg(feature = "bluetooth")]
+    {
+        core.send_message(message).await?;
+        println!("✅ Message sent");
+    }
+    
+    #[cfg(not(feature = "bluetooth"))]
+    {
+        println!("⚠️  Bluetooth not available - message not sent");
+    }
+    
+    Ok(())
+}
+
+async fn send_message_inline(core: &BitchatCore, message: &str) -> anyhow::Result<()> {
+    #[cfg(feature = "bluetooth")]
+    {
+        core.send_message(message).await?;
+        println!("📤 Sent: {}", message);
+    }
+    
+    #[cfg(not(feature = "bluetooth"))]
+    {
+        println!("⚠️  Bluetooth not available");
+    }
+    
+    Ok(())
+}
+
+async fn show_peers(core: BitchatCore) -> anyhow::Result<()> {
+    show_peers_inline(&core).await;
+    Ok(())
+}
+
+async fn show_peers_inline(core: &BitchatCore) {
+    #[cfg(feature = "bluetooth")]
+    {
+        let bluetooth = core.bluetooth.lock().await;
+        let peers = bluetooth.get_connected_peers().await;
+        
+        if peers.is_empty() {
+            println!("👥 No connected peers");
+        } else {
+            println!("👥 Connected peers ({}):", peers.len());
+            for peer in peers {
+                println!("  🔗 {} (RSSI: {}dBm)", peer.peer_id, peer.rssi);
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "bluetooth"))]
+    {
+        println!("⚠️  Bluetooth not available");
     }
 }

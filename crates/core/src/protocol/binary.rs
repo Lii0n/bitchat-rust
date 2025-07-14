@@ -4,7 +4,7 @@ use super::packet::{BitchatPacket, MessageType, flags, HEADER_SIZE, PEER_ID_SIZE
 use crate::protocol::peer_utils;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BufMut, BytesMut};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Binary Protocol Manager - handles encoding/decoding
 pub struct BinaryProtocolManager;

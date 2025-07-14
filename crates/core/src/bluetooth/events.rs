@@ -1,7 +1,6 @@
 //! Bluetooth event handling and configuration
 
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 
 /// Bluetooth events that can occur during operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
