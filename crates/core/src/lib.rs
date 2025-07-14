@@ -5,6 +5,7 @@
 //! and protocol functionality for secure peer-to-peer messaging.
 
 // Core modules
+pub mod constants;
 pub mod crypto;
 pub mod protocol;
 pub mod channel;
@@ -24,7 +25,7 @@ pub use commands::{CommandProcessor, BitchatCommand, CommandResult};
 pub use config::Config;
 
 #[cfg(feature = "bluetooth")]
-pub use bluetooth::{BluetoothEvent, BluetoothConfig, BluetoothManager};
+pub use bluetooth::{BluetoothEvent, BluetoothConfig, BluetoothManager, CompatibilityManager};
 
 // Configuration and core types
 use serde::{Serialize, Deserialize};
@@ -171,7 +172,7 @@ impl BitchatCore {
         let bluetooth = {
             let bluetooth_config = BluetoothConfig::default()
                 .with_device_name(config.device_name.clone());
-            let bluetooth_manager = BluetoothManager::with_config(bluetooth_config).await?;
+            let (bluetooth_manager, _receiver) = BluetoothManager::with_config(bluetooth_config).await?;
             Arc::new(Mutex::new(bluetooth_manager))
         };
         

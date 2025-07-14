@@ -125,15 +125,31 @@ async fn main() -> Result<()> {
     println!("🔄 Starting BitChat services...\n");
 
     // Create command processor
-    let processor = CommandProcessor::new(
-        core.bluetooth.clone(),
-        Arc::new(Mutex::new(core.crypto)),
-        Arc::new(core.storage),
-        Arc::new(core.config),
-        core.packet_router.clone(),
-        core.channel_manager.clone(),
-        my_peer_id,
-    );
+    let processor = {
+        #[cfg(feature = "bluetooth")]
+        {
+            CommandProcessor::new(
+                core.bluetooth.clone(),
+                Arc::new(Mutex::new(core.crypto)),
+                Arc::new(core.storage),
+                Arc::new(core.config),
+                core.packet_router.clone(),
+                core.channel_manager.clone(),
+                my_peer_id,
+            )
+        }
+        #[cfg(not(feature = "bluetooth"))]
+        {
+            CommandProcessor::new(
+                Arc::new(Mutex::new(core.crypto)),
+                Arc::new(core.storage),
+                Arc::new(core.config),
+                core.packet_router.clone(),
+                core.channel_manager.clone(),
+                my_peer_id,
+            )
+        }
+    };
 
     println!("✅ BitChat ready! Available commands:");
     print_help();

@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
 /// Compatibility manager that makes Rust devices work with existing iOS/Android implementations
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CompatibilityManager {
     my_peer_id: String,
     connections_in_progress: Arc<RwLock<HashSet<String>>>,
@@ -18,13 +18,13 @@ pub struct CompatibilityManager {
     discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ConnectionAttempt {
     started_at: Instant,
     retry_count: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DiscoveredDevice {
     peer_id: String,
     device_id: String,

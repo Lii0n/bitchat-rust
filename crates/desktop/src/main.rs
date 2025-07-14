@@ -61,16 +61,40 @@ async fn main() -> Result<()> {
     
     println!("🆔 Peer ID: {}", hex::encode(my_peer_id));
     println!("🔄 Starting BitChat services...\n");
+    
+    // Start Bluetooth manager
+    #[cfg(feature = "bluetooth")]
+    {
+        let bluetooth = core.bluetooth.lock().await;
+        bluetooth.start().await?;
+        println!("📡 Bluetooth manager started - scanning for peers...");
+    }
 
-    let processor = Arc::new(CommandProcessor::new(
-        core.bluetooth.clone(),
-        Arc::new(Mutex::new(core.crypto)),
-        Arc::new(core.storage),
-        Arc::new(core.config),
-        core.packet_router.clone(),
-        core.channel_manager.clone(),
-        my_peer_id,
-    ));
+    let processor = Arc::new({
+        #[cfg(feature = "bluetooth")]
+        {
+            CommandProcessor::new(
+                core.bluetooth.clone(),
+                Arc::new(Mutex::new(core.crypto)),
+                Arc::new(core.storage),
+                Arc::new(core.config),
+                core.packet_router.clone(),
+                core.channel_manager.clone(),
+                my_peer_id,
+            )
+        }
+        #[cfg(not(feature = "bluetooth"))]
+        {
+            CommandProcessor::new(
+                Arc::new(Mutex::new(core.crypto)),
+                Arc::new(core.storage),
+                Arc::new(core.config),
+                core.packet_router.clone(),
+                core.channel_manager.clone(),
+                my_peer_id,
+            )
+        }
+    });
 
     println!("✅ BitChat Desktop ready!");
 

@@ -36,6 +36,9 @@ bytes = "1.0"
 # Bluetooth (optional - may need platform-specific features)
 btleplug = { version = "0.11", optional = true }
 
+# Additional Bluetooth support
+async-stream = "0.3"
+
 # Utilities
 anyhow = "1.0"
 thiserror = "1.0"
@@ -49,4 +52,4 @@ dirs = "5.0"
 
 [features]
 default = ["bluetooth"]
-bluetooth = []
+bluetooth = ["btleplug"]
