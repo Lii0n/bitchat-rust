@@ -1,201 +1,188 @@
-//! Bluetooth event handling and configuration
+// Replace crates/core/src/bluetooth/events.rs
 
-use serde::{Serialize, Deserialize};
+//! Bluetooth events for BitChat mesh networking
 
-/// Bluetooth events that can occur during operation
+use serde::{Deserialize, Serialize};
+use crate::protocol::BitchatPacket;
+
+/// Events emitted by the Bluetooth manager
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BluetoothEvent {
+    /// Bluetooth adapter state changed
+    AdapterStateChanged {
+        powered_on: bool,
+        scanning: bool,
+        advertising: bool,
+    },
+    
+    /// Device discovered during scan
     DeviceDiscovered {
         device_id: String,
         device_name: Option<String>,
         rssi: i8,
     },
-    DeviceConnected {
-        device_id: String,
+    
+    /// Peer connected successfully
+    PeerConnected {
         peer_id: String,
     },
-    DeviceDisconnected {
-        device_id: String,
+    
+    /// Peer disconnected
+    PeerDisconnected {
         peer_id: String,
     },
-    MessageReceived {
-        from_peer: String,
-        data: Vec<u8>,
+    
+    /// Connection attempt failed
+    ConnectionFailed {
+        peer_id: String,
+        error: String,
     },
-    MessageSent {
-        to_peer: Option<String>, // None for broadcast
-        data: Vec<u8>,
+    
+    /// Packet received from peer
+    PacketReceived {
+        peer_id: String,
+        packet: BitchatPacket,
     },
-    ScanStarted,
-    ScanStopped,
-    AdvertisingStarted,
-    AdvertisingStopped,
+    
+    /// Packet send failed
+    PacketSendFailed {
+        peer_id: String,
+        error: String,
+    },
+    
+    /// RSSI updated for peer
+    RssiUpdated {
+        peer_id: String,
+        rssi: i16,
+    },
+    
+    /// Service/characteristic discovered
+    ServiceDiscovered {
+        peer_id: String,
+        service_ready: bool,
+    },
+    
+    /// Key exchange completed with peer
+    KeyExchangeCompleted {
+        peer_id: String,
+        success: bool,
+    },
+    
+    /// Announcement received from peer
+    AnnouncementReceived {
+        peer_id: String,
+        nickname: String,
+    },
+    
+    /// Error occurred in Bluetooth subsystem
     Error {
-        message: String,
+        error: String,
+        context: Option<String>,
     },
 }
 
-/// Configuration for Bluetooth operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BluetoothConfig {
-    pub device_name: String,
-    pub scan_duration_ms: u64,
-    pub advertise_duration_ms: u64,
-    pub max_connections: usize,
-    pub verbose_logging: bool,
-    pub connection_timeout_ms: u64,
-}
-
-impl Default for BluetoothConfig {
-    fn default() -> Self {
-        Self {
-            device_name: "BitChat-Device".to_string(),
-            scan_duration_ms: 5000,
-            advertise_duration_ms: 10000,
-            max_connections: 10,
-            verbose_logging: false,
-            connection_timeout_ms: 30000,
+impl BluetoothEvent {
+    /// Get the peer ID associated with this event, if any
+    pub fn peer_id(&self) -> Option<&str> {
+        match self {
+            BluetoothEvent::PeerConnected { peer_id } => Some(peer_id),
+            BluetoothEvent::PeerDisconnected { peer_id } => Some(peer_id),
+            BluetoothEvent::ConnectionFailed { peer_id, .. } => Some(peer_id),
+            BluetoothEvent::PacketReceived { peer_id, .. } => Some(peer_id),
+            BluetoothEvent::PacketSendFailed { peer_id, .. } => Some(peer_id),
+            BluetoothEvent::RssiUpdated { peer_id, .. } => Some(peer_id),
+            BluetoothEvent::ServiceDiscovered { peer_id, .. } => Some(peer_id),
+            BluetoothEvent::KeyExchangeCompleted { peer_id, .. } => Some(peer_id),
+            BluetoothEvent::AnnouncementReceived { peer_id, .. } => Some(peer_id),
+            _ => None,
+        }
+    }
+    
+    /// Check if this is an error event
+    pub fn is_error(&self) -> bool {
+        matches!(self, BluetoothEvent::Error { .. } | BluetoothEvent::ConnectionFailed { .. } | BluetoothEvent::PacketSendFailed { .. })
+    }
+    
+    /// Check if this is a connection-related event
+    pub fn is_connection_event(&self) -> bool {
+        matches!(
+            self,
+            BluetoothEvent::PeerConnected { .. } | 
+            BluetoothEvent::PeerDisconnected { .. } | 
+            BluetoothEvent::ConnectionFailed { .. }
+        )
+    }
+    
+    /// Get a human-readable description of the event
+    pub fn description(&self) -> String {
+        match self {
+            BluetoothEvent::AdapterStateChanged { powered_on, scanning, advertising } => {
+                format!("Adapter state: powered={}, scanning={}, advertising={}", powered_on, scanning, advertising)
+            }
+            BluetoothEvent::DeviceDiscovered { device_name, rssi, .. } => {
+                format!("Discovered device: {} (RSSI: {} dBm)", 
+                       device_name.as_deref().unwrap_or("unknown"), rssi)
+            }
+            BluetoothEvent::PeerConnected { peer_id } => {
+                format!("Connected to peer: {}", peer_id)
+            }
+            BluetoothEvent::PeerDisconnected { peer_id } => {
+                format!("Disconnected from peer: {}", peer_id)
+            }
+            BluetoothEvent::ConnectionFailed { peer_id, error } => {
+                format!("Connection failed to {}: {}", peer_id, error)
+            }
+            BluetoothEvent::PacketReceived { peer_id, packet } => {
+                format!("Received {:?} from {}", packet.message_type, peer_id)
+            }
+            BluetoothEvent::PacketSendFailed { peer_id, error } => {
+                format!("Send failed to {}: {}", peer_id, error)
+            }
+            BluetoothEvent::RssiUpdated { peer_id, rssi } => {
+                format!("RSSI updated for {}: {} dBm", peer_id, rssi)
+            }
+            BluetoothEvent::ServiceDiscovered { peer_id, service_ready } => {
+                format!("Service discovered for {}: ready={}", peer_id, service_ready)
+            }
+            BluetoothEvent::KeyExchangeCompleted { peer_id, success } => {
+                format!("Key exchange with {}: {}", peer_id, if *success { "success" } else { "failed" })
+            }
+            BluetoothEvent::AnnouncementReceived { peer_id, nickname } => {
+                format!("Announcement from {}: {}", peer_id, nickname)
+            }
+            BluetoothEvent::Error { error, context } => {
+                match context {
+                    Some(ctx) => format!("Error in {}: {}", ctx, error),
+                    None => format!("Error: {}", error),
+                }
+            }
         }
     }
 }
 
-impl BluetoothConfig {
-    /// Create a new config with a specific device name
-    pub fn with_device_name(mut self, name: String) -> Self {
-        self.device_name = name;
-        self
-    }
-
-    /// Enable verbose logging
-    pub fn with_verbose_logging(mut self) -> Self {
-        self.verbose_logging = true;
-        self
-    }
-
-    /// Set maximum connections
-    pub fn with_max_connections(mut self, max: usize) -> Self {
-        self.max_connections = max;
-        self
-    }
-
-    /// Set scan duration
-    pub fn with_scan_duration(mut self, duration_ms: u64) -> Self {
-        self.scan_duration_ms = duration_ms;
-        self
-    }
+/// Event listener trait for Bluetooth events
+pub trait BluetoothEventListener: Send + Sync {
+    /// Handle a Bluetooth event
+    fn handle_event(&self, event: BluetoothEvent);
 }
 
-/// Information about a connected peer
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectedPeer {
-    pub device_id: String,
-    pub peer_id: String,
-    pub nickname: Option<String>,
-    pub rssi: i8,
-    pub connected_at: u64, // Timestamp
-    pub last_seen: u64,
-    pub message_count: u32,
-}
+/// Simple event handler that logs events
+pub struct LoggingEventListener;
 
-impl ConnectedPeer {
-    pub fn new(device_id: String, peer_id: String, rssi: i8) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        Self {
-            device_id,
-            peer_id,
-            nickname: None,
-            rssi,
-            connected_at: now,
-            last_seen: now,
-            message_count: 0,
-        }
-    }
-
-    pub fn update_activity(&mut self, rssi: Option<i8>) {
-        self.last_seen = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl BluetoothEventListener for LoggingEventListener {
+    fn handle_event(&self, event: BluetoothEvent) {
+        use tracing::{info, warn, error};
         
-        if let Some(new_rssi) = rssi {
-            self.rssi = new_rssi;
+        match &event {
+            BluetoothEvent::Error { .. } | BluetoothEvent::ConnectionFailed { .. } | BluetoothEvent::PacketSendFailed { .. } => {
+                error!("Bluetooth event: {}", event.description());
+            }
+            BluetoothEvent::PeerConnected { .. } | BluetoothEvent::PeerDisconnected { .. } => {
+                info!("Bluetooth event: {}", event.description());
+            }
+            _ => {
+                info!("Bluetooth event: {}", event.description());
+            }
         }
-        
-        self.message_count = self.message_count.saturating_add(1);
-    }
-}
-
-/// Delegate trait for handling Bluetooth events
-pub trait BluetoothConnectionDelegate: Send + Sync {
-    fn on_device_discovered(&self, device_id: &str, device_name: Option<&str>, rssi: i8);
-    fn on_device_connected(&self, device_id: &str, peer_id: &str);
-    fn on_device_disconnected(&self, device_id: &str, peer_id: &str);
-    fn on_message_received(&self, from_peer: &str, data: &[u8]);
-    fn on_error(&self, message: &str);
-}
-
-/// Simple event handler that can be used for testing or basic operations
-#[derive(Debug, Default)]
-pub struct BasicBluetoothDelegate {
-    pub events: std::sync::Mutex<Vec<BluetoothEvent>>,
-}
-
-impl BasicBluetoothDelegate {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get_events(&self) -> Vec<BluetoothEvent> {
-        self.events.lock().unwrap().clone()
-    }
-
-    pub fn clear_events(&self) {
-        self.events.lock().unwrap().clear();
-    }
-}
-
-impl BluetoothConnectionDelegate for BasicBluetoothDelegate {
-    fn on_device_discovered(&self, device_id: &str, device_name: Option<&str>, rssi: i8) {
-        let event = BluetoothEvent::DeviceDiscovered {
-            device_id: device_id.to_string(),
-            device_name: device_name.map(|s| s.to_string()),
-            rssi,
-        };
-        self.events.lock().unwrap().push(event);
-    }
-
-    fn on_device_connected(&self, device_id: &str, peer_id: &str) {
-        let event = BluetoothEvent::DeviceConnected {
-            device_id: device_id.to_string(),
-            peer_id: peer_id.to_string(),
-        };
-        self.events.lock().unwrap().push(event);
-    }
-
-    fn on_device_disconnected(&self, device_id: &str, peer_id: &str) {
-        let event = BluetoothEvent::DeviceDisconnected {
-            device_id: device_id.to_string(),
-            peer_id: peer_id.to_string(),
-        };
-        self.events.lock().unwrap().push(event);
-    }
-
-    fn on_message_received(&self, from_peer: &str, data: &[u8]) {
-        let event = BluetoothEvent::MessageReceived {
-            from_peer: from_peer.to_string(),
-            data: data.to_vec(),
-        };
-        self.events.lock().unwrap().push(event);
-    }
-
-    fn on_error(&self, message: &str) {
-        let event = BluetoothEvent::Error {
-            message: message.to_string(),
-        };
-        self.events.lock().unwrap().push(event);
     }
 }

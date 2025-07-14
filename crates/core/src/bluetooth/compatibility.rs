@@ -1,8 +1,11 @@
+// Replace crates/core/src/bluetooth/compatibility.rs
+
 //! Compatibility layer for connecting Rust devices to existing iOS/Android mesh
 //! 
 //! This module implements connection arbitration logic that prevents dual role conflicts
 //! by ensuring deterministic connection behavior compatible with iOS/Android implementations.
 
+use crate::protocol::peer_utils;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use std::sync::Arc;
@@ -10,21 +13,21 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
 /// Compatibility manager that makes Rust devices work with existing iOS/Android implementations
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CompatibilityManager {
-    my_peer_id: String,
+    my_peer_id: String, // 8-character hex string (iOS/Android format)
     connections_in_progress: Arc<RwLock<HashSet<String>>>,
     connection_attempts: Arc<RwLock<HashMap<String, ConnectionAttempt>>>,
     discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ConnectionAttempt {
     started_at: Instant,
     retry_count: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct DiscoveredDevice {
     peer_id: String,
     device_id: String,
@@ -33,22 +36,36 @@ struct DiscoveredDevice {
 }
 
 impl CompatibilityManager {
+    /// Create new compatibility manager with iOS/Android compatible peer ID
     pub fn new(my_peer_id: String) -> Self {
-        info!("Initializing compatibility manager with peer ID: {}", my_peer_id);
+        // Ensure peer ID is in correct format
+        let formatted_peer_id = if peer_utils::is_valid_peer_id_string(&my_peer_id) {
+            my_peer_id.to_uppercase()
+        } else {
+            warn!("Invalid peer ID format '{}', generating new one", my_peer_id);
+            peer_utils::generate_compatible_peer_id()
+        };
+        
+        info!("Initializing iOS/Android compatibility manager with peer ID: {}", formatted_peer_id);
+        
         Self {
-            my_peer_id,
+            my_peer_id: formatted_peer_id,
             connections_in_progress: Arc::new(RwLock::new(HashSet::new())),
             connection_attempts: Arc::new(RwLock::new(HashMap::new())),
             discovered_devices: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
+    /// Create compatibility manager from device info (deterministic)
+    pub fn from_device_info(device_info: &str) -> Self {
+        let peer_id = peer_utils::peer_id_from_device_info(device_info);
+        Self::new(peer_id)
+    }
+    
     /// Determine if we should connect to this peer based on peer ID comparison
     /// This is the key to avoiding dual role conflicts with iOS/Android
     pub fn should_initiate_connection(&self, remote_peer_id: &str) -> bool {
-        // Use lexicographic comparison - lower peer ID connects to higher
-        // This ensures deterministic connection behavior across all platforms
-        let should_connect = self.my_peer_id.as_str() < remote_peer_id;
+        let should_connect = peer_utils::should_initiate_connection(&self.my_peer_id, remote_peer_id);
         debug!("Connection decision: {} {} {} = {}", 
                self.my_peer_id, 
                if should_connect { "<" } else { ">=" },
@@ -67,7 +84,9 @@ impl CompatibilityManager {
         max_connections: usize,
     ) -> Option<String> {
         // Extract peer ID from device name (8-character format used by iOS/Android)
-        let peer_id = match device_name.as_ref().and_then(|name| self.extract_peer_id(name)) {
+        let peer_id = match device_name.as_ref().and_then(|name| {
+            peer_utils::extract_peer_id_from_device_name(name)
+        }) {
             Some(id) => id,
             None => {
                 debug!("No valid peer ID found in device name: {:?}", device_name);
@@ -76,6 +95,12 @@ impl CompatibilityManager {
         };
         
         info!("Discovered peer: {}, RSSI: {}, Device: {}", peer_id, rssi, device_id);
+        
+        // Don't connect to ourselves
+        if peer_id == self.my_peer_id {
+            debug!("Ignoring our own advertisement: {}", peer_id);
+            return None;
+        }
         
         // Store discovered device info
         {
@@ -88,7 +113,7 @@ impl CompatibilityManager {
             });
         }
         
-        // Check if we should initiate connection
+        // Check if we should initiate connection based on peer ID comparison
         if !self.should_initiate_connection(&peer_id) {
             info!("Not my role to connect to {} - they should connect to me", peer_id);
             return None;
@@ -100,9 +125,9 @@ impl CompatibilityManager {
             return None;
         }
         
-        // Check signal strength (same threshold as Android implementation)
+        // Check signal strength (same threshold as iOS/Android implementation)
         if rssi < -85 {
-            info!("Signal too weak for {}: {}", peer_id, rssi);
+            info!("Signal too weak for {}: {} dBm", peer_id, rssi);
             return None;
         }
         
@@ -112,25 +137,16 @@ impl CompatibilityManager {
             return None;
         }
         
+        // Check retry limits
+        if !self.should_retry_connection(&peer_id).await {
+            debug!("Retry limit reached for {}", peer_id);
+            return None;
+        }
+        
         // Mark connection attempt
         self.mark_connection_in_progress(&peer_id).await;
         
         Some(peer_id)
-    }
-    
-    /// Extract peer ID from device name (compatible with iOS/Android format)
-    fn extract_peer_id(&self, device_name: &str) -> Option<String> {
-        // iOS/Android use 8-character peer IDs as device names
-        if device_name.len() == 8 {
-            // Check if it's all hex characters
-            if device_name.chars().all(|c| c.is_ascii_hexdigit()) {
-                Some(device_name.to_uppercase())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
     }
     
     /// Check if connection attempt is in progress
@@ -142,7 +158,7 @@ impl CompatibilityManager {
             return false;
         }
         
-        // Check if attempt has timed out
+        // Check if attempt has timed out (10 second timeout)
         if let Some(attempt) = attempts.get(peer_id) {
             if attempt.started_at.elapsed() > Duration::from_secs(10) {
                 // Clean up expired attempt
@@ -189,19 +205,9 @@ impl CompatibilityManager {
         warn!("Cleaned up expired connection attempt to {}", peer_id);
     }
     
-    /// Generate peer ID compatible with iOS/Android (8 hex characters)
-    pub fn generate_compatible_peer_id() -> String {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 4] = rng.gen();
-        hex::encode(bytes).to_uppercase()
-    }
-    
     /// Create advertisement name compatible with iOS/Android
     pub fn create_advertisement_name(&self) -> String {
-        // Use first 8 characters of peer ID as device name
-        // This matches the iOS/Android format
-        self.my_peer_id[..8.min(self.my_peer_id.len())].to_string()
+        peer_utils::create_advertisement_name(&self.my_peer_id)
     }
     
     /// Determine if we should retry connection
@@ -231,7 +237,7 @@ impl CompatibilityManager {
         }
     }
     
-    /// Clean up old discovered devices
+    /// Clean up old discovered devices (30 second timeout)
     pub async fn cleanup_old_discoveries(&self) {
         let mut discovered = self.discovered_devices.write().await;
         let cutoff = Instant::now() - Duration::from_secs(30);
@@ -254,15 +260,17 @@ impl CompatibilityManager {
         let mut info = format!(
             "iOS/Android Compatibility Manager:\n\
              ===================================\n\
-             My Peer ID: {}\n\
+             My Peer ID: {} (8-char hex format)\n\
              Connections in Progress: {}\n\
              Total Attempts: {}\n\
              Discovered Devices: {}\n\
-             Connection Rule: Lower peer ID connects to higher\n\n",
+             Connection Rule: Lower peer ID connects to higher\n\
+             Advertisement Name: {}\n\n",
             self.my_peer_id,
             connections.len(),
             attempts.len(),
-            discovered.len()
+            discovered.len(),
+            self.create_advertisement_name()
         );
         
         if !connections.is_empty() {
@@ -281,11 +289,13 @@ impl CompatibilityManager {
         if !discovered.is_empty() {
             info.push_str("Recently Discovered:\n");
             for (device_id, device) in discovered.iter() {
-                info.push_str(&format!("  - {}: {} (RSSI: {}, {}s ago)\n",
+                let will_connect = self.should_initiate_connection(&device.peer_id);
+                info.push_str(&format!("  - {}: {} (RSSI: {} dBm, {}s ago) {}\n",
                                      device.peer_id,
                                      device_id,
                                      device.rssi,
-                                     device.last_seen.elapsed().as_secs()));
+                                     device.last_seen.elapsed().as_secs(),
+                                     if will_connect { "[WILL CONNECT]" } else { "[WAIT FOR THEM]" }));
             }
         }
         
@@ -295,5 +305,13 @@ impl CompatibilityManager {
     /// Get the peer ID
     pub fn get_peer_id(&self) -> &str {
         &self.my_peer_id
+    }
+    
+    /// Get discovered peers list
+    pub async fn get_discovered_peers(&self) -> Vec<(String, i8, Duration)> {
+        let discovered = self.discovered_devices.read().await;
+        discovered.values()
+            .map(|device| (device.peer_id.clone(), device.rssi, device.last_seen.elapsed()))
+            .collect()
     }
 }

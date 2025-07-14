@@ -4,16 +4,23 @@ use serde::{Deserialize, Serialize};
 
 // Protocol constants
 pub const PROTOCOL_VERSION: u8 = 1;
-pub const HEADER_SIZE: usize = 15;  // version(1) + type(1) + ttl(1) + timestamp(8) + flags(1) + payload_len(2) + sender_id(8)
+pub const HEADER_SIZE: usize = 13;  
 pub const PEER_ID_SIZE: usize = 8;
 pub const SIGNATURE_SIZE: usize = 64;
 pub const MAX_TTL: u8 = 7;
 
 // Flag constants
 pub mod flags {
+    /// Indicates packet has a recipient ID field
     pub const HAS_RECIPIENT: u8 = 0x01;
+    
+    /// Indicates packet has a signature field
     pub const HAS_SIGNATURE: u8 = 0x02;
-    pub const IS_ENCRYPTED: u8 = 0x04;
+    
+    /// Indicates payload is compressed with LZ4 (ADD THIS)
+    pub const IS_COMPRESSED: u8 = 0x04;
+    
+    // Keep any other existing flags you have
 }
 
 /// Message types for BitChat protocol
@@ -281,8 +288,8 @@ impl BitchatPacket {
     }
 
     /// Check if packet is encrypted
-    pub fn is_encrypted(&self) -> bool {
-        self.flags & flags::IS_ENCRYPTED != 0
+    pub fn is_compressed(&self) -> bool {
+        self.flags & flags::IS_COMPRESSED != 0
     }
 }
 

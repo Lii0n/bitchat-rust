@@ -47,6 +47,26 @@ hex = { workspace = true }
 # File system
 dirs = { workspace = true }
 
+lz4 = "1.24"
+
 [features]
 default = ["bluetooth"]
 bluetooth = ["btleplug"]
+
+# Windows-specific Bluetooth support
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52", features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement", 
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+] }
+tokio-stream = "0.1"
+
+# Keep btleplug as fallback for other platforms
+[target.'cfg(not(windows))'.dependencies]
+btleplug = { version = "0.11", optional = true }
