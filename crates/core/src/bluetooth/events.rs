@@ -100,9 +100,9 @@ pub struct BluetoothConfig {
     pub peer_cleanup_timeout_secs: u64,
     /// Whether to automatically retry failed connections
     pub auto_retry: bool,
-    /// Device name to advertise
+    /// Device name for identification
     pub device_name: String,
-    /// Whether to enable verbose logging
+    /// Enable verbose logging
     pub verbose_logging: bool,
 }
 
@@ -142,6 +142,12 @@ impl BluetoothConfig {
     /// Set scan interval
     pub fn with_scan_interval_ms(mut self, interval_ms: u64) -> Self {
         self.scan_interval_ms = interval_ms;
+        self
+    }
+
+    /// Set connection timeout
+    pub fn with_connection_timeout(mut self, timeout_secs: u64) -> Self {
+        self.connection_timeout_secs = timeout_secs;
         self
     }
 }

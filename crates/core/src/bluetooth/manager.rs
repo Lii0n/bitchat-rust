@@ -160,44 +160,45 @@ impl BluetoothConnectionManager {
                     btleplug::api::CentralEvent::DeviceDiscovered(id) => {
                         if let Ok(peripheral) = adapter.peripheral(&id).await {
                             if let Ok(Some(properties)) = peripheral.properties().await {
-                                // Check if this device advertises our service
-                                if let Some(services) = properties.services {
-                                    if services.contains(&BITCHAT_SERVICE_UUID) {
-                                        let peer_id = id.to_string();
-                                        let name = properties.local_name.clone();
-                                        let rssi = properties.rssi.unwrap_or(0);
-                                        
-                                        info!("Discovered BitChat peer: {} ({})", 
-                                             name.as_deref().unwrap_or("Unknown"), peer_id);
-                                        
-                                        // Try to connect
-                                        if let Err(e) = peripheral.connect().await {
-                                            warn!("Failed to connect to {}: {}", peer_id, e);
-                                        } else {
-                                            // Add to connected peers
-                                            let peer = ConnectedPeer {
-                                                id: peer_id.clone(),
-                                                peripheral,
-                                                name: name.clone(),
-                                                rssi,
-                                                connected_at: Instant::now(),
-                                                last_seen: Instant::now(),
-                                                message_characteristic: None,
-                                            };
-                                            connected_peers.write().await.insert(peer_id.clone(), peer);
-                                            
-                                            // Emit events
-                                            let _ = event_sender.send(BluetoothEvent::PeerDiscovered {
-                                                peer_id: peer_id.clone(),
-                                                name,
-                                                rssi,
-                                            });
-                                            
-                                            let _ = event_sender.send(BluetoothEvent::PeerConnected {
-                                                peer_id,
-                                            });
-                                        }
+                                // FIXED: Check if this device advertises our service (direct check, no Option)
+                                if properties.services.contains(&BITCHAT_SERVICE_UUID) {
+                                    let peer_id = id.to_string();
+                                    let name = properties.local_name.clone(); // Clone to avoid move
+                                    let rssi = properties.rssi.unwrap_or(0);
+                                    
+                                    info!("Discovered BitChat peer: {} ({})", 
+                                         name.as_deref().unwrap_or("Unknown"), peer_id);
+                                    
+                                    // Try to connect
+                                    if let Err(e) = peripheral.connect().await {
+                                        warn!("Failed to connect to peer {}: {}", peer_id, e);
+                                        continue;
                                     }
+                                    
+                                    // FIXED: Create ConnectedPeer with correct field types
+                                    let peer = ConnectedPeer {
+                                        id: peer_id.clone(),
+                                        peripheral: peripheral.clone(),
+                                        name: name.clone(), // Clone for struct
+                                        rssi: rssi,
+                                        connected_at: Instant::now(),
+                                        last_seen: Instant::now(),
+                                        message_characteristic: None,
+                                    };
+                                    
+                                    connected_peers.write().await.insert(peer_id.clone(), peer);
+                                    
+                                    // Emit discovery event (using cloned name)
+                                    let _ = event_sender.send(BluetoothEvent::PeerDiscovered {
+                                        peer_id: peer_id.clone(),
+                                        name: name, // Use original name here
+                                        rssi: rssi,
+                                    });
+                                    
+                                    // Emit connection event
+                                    let _ = event_sender.send(BluetoothEvent::PeerConnected {
+                                        peer_id: peer_id,
+                                    });
                                 }
                             }
                         }
@@ -206,11 +207,24 @@ impl BluetoothConnectionManager {
                         let peer_id = id.to_string();
                         connected_peers.write().await.remove(&peer_id);
                         
+                        info!("Peer disconnected: {}", peer_id);
                         let _ = event_sender.send(BluetoothEvent::PeerDisconnected {
-                            peer_id,
+                            peer_id: peer_id,
                         });
                     }
-                    _ => {}
+                    btleplug::api::CentralEvent::DeviceConnected(id) => {
+                        let peer_id = id.to_string();
+                        info!("Peer connected: {}", peer_id);
+                        
+                        // Update last seen time (removed mut - not needed)
+                        if let Some(peer) = connected_peers.write().await.get_mut(&peer_id) {
+                            peer.last_seen = Instant::now();
+                        }
+                    }
+                    _ => {
+                        // Handle other events as needed
+                        debug!("Received other Bluetooth event: {:?}", event);
+                    }
                 }
             }
         });
@@ -218,9 +232,45 @@ impl BluetoothConnectionManager {
         *self.scan_task.lock().await = Some(task);
     }
 
+    /// Start a cleanup task to remove stale peers
+    async fn start_cleanup_task(&self) {
+        let connected_peers = self.connected_peers.clone();
+        let event_sender = self.event_sender.clone();
+        let timeout_secs = self.config.connection_timeout_secs;
+        
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            
+            loop {
+                interval.tick().await;
+                
+                let mut to_remove = Vec::new();
+                {
+                    let peers = connected_peers.read().await;
+                    for (peer_id, peer) in peers.iter() {
+                        if peer.is_stale(timeout_secs) {
+                            to_remove.push(peer_id.clone());
+                        }
+                    }
+                }
+                
+                for peer_id in to_remove {
+                    connected_peers.write().await.remove(&peer_id);
+                    info!("Removed stale peer: {}", peer_id);
+                    
+                    let _ = event_sender.send(BluetoothEvent::PeerDisconnected {
+                        peer_id: peer_id,
+                    });
+                }
+            }
+        });
+        
+        *self.cleanup_task.lock().await = Some(task);
+    }
+
     /// Broadcast a message to all connected peers
     pub async fn broadcast_message(&self, data: &[u8]) -> Result<()> {
-        info!("Broadcasting {} bytes to connected peers", data.len());
+        debug!("Broadcasting {} bytes to connected peers", data.len());
         
         let peers = self.connected_peers.read().await;
         if peers.is_empty() {
