@@ -9,7 +9,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, SharedSecret};
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use sha2::{Sha256, Digest};
 use hkdf::Hkdf;
-use rand::{RngCore, CryptoRng};
+use rand::RngCore;
 use rand_core::OsRng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ pub struct EncryptedMessage {
     pub tag: [u8; 16],
 }
 
-/// Digital signature with metadata - Fixed serialization issue
+/// Digital signature with metadata
 #[derive(Debug, Clone)]
 pub struct MessageSignature {
     pub signature: [u8; 64],
@@ -69,7 +69,7 @@ pub struct MessageSignature {
     pub timestamp: u64,
 }
 
-// Manual Serialize/Deserialize implementation for MessageSignature to handle [u8; 64]
+// Manual Serialize/Deserialize implementation for MessageSignature
 impl Serialize for MessageSignature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -89,7 +89,7 @@ impl<'de> Deserialize<'de> for MessageSignature {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::{self, Visitor, SeqAccess, MapAccess};
+        use serde::de::{self, Visitor, MapAccess};
         use std::fmt;
 
         struct MessageSignatureVisitor;
@@ -112,21 +112,12 @@ impl<'de> Deserialize<'de> for MessageSignature {
                 while let Some(key) = map.next_key()? {
                     match key {
                         "signature" => {
-                            if signature.is_some() {
-                                return Err(de::Error::duplicate_field("signature"));
-                            }
                             signature = Some(map.next_value()?);
                         }
                         "public_key" => {
-                            if public_key.is_some() {
-                                return Err(de::Error::duplicate_field("public_key"));
-                            }
                             public_key = Some(map.next_value()?);
                         }
                         "timestamp" => {
-                            if timestamp.is_some() {
-                                return Err(de::Error::duplicate_field("timestamp"));
-                            }
                             timestamp = Some(map.next_value()?);
                         }
                         _ => {
@@ -168,7 +159,10 @@ impl CryptoManager {
     /// Create a new crypto manager with a fresh identity
     pub fn new() -> Result<Self> {
         let mut csprng = OsRng;
-        let identity_signing_key = SigningKey::generate(&mut csprng); // Fixed: use generate method properly
+        // Fixed: Generate random bytes and create SigningKey from them
+        let mut private_key = [0u8; 32];
+        csprng.fill_bytes(&mut private_key);
+        let identity_signing_key = SigningKey::from_bytes(&private_key);
         let identity_verifying_key = identity_signing_key.verifying_key();
         
         Ok(Self {
@@ -218,7 +212,7 @@ impl CryptoManager {
 
     /// Generate ephemeral keypair for key exchange
     pub fn generate_ephemeral_keypair(&self) -> (EphemeralSecret, X25519PublicKey) {
-        let secret = EphemeralSecret::random_from_rng(OsRng); // Fixed: use proper method
+        let secret = EphemeralSecret::random_from_rng(&mut OsRng);
         let public = X25519PublicKey::from(&secret);
         (secret, public)
     }
@@ -285,10 +279,11 @@ impl CryptoManager {
                 .duration_since(UNIX_EPOCH)?
                 .as_secs();
 
-            cache.shared_secret // Copy the key
+            cache.shared_secret
         };
 
-        self.encrypt_with_key(plaintext, &shared_secret)
+        // Fixed argument order: key first, then plaintext
+        self.encrypt_with_key(&shared_secret, plaintext)
     }
 
     /// Decrypt message from a specific peer
@@ -300,22 +295,20 @@ impl CryptoManager {
     }
 
     /// Encrypt data with a specific key
-    pub fn encrypt_with_key(&self, plaintext: &[u8], key: &[u8; 32]) -> Result<EncryptedMessage> {
+    pub fn encrypt_with_key(&self, key: &[u8; 32], plaintext: &[u8]) -> Result<EncryptedMessage> {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-        
-        // Generate random nonce
+        // Fixed: Generate nonce manually
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
-
-        // Encrypt in place
-        let mut buffer = plaintext.to_vec();
-        let tag = cipher.encrypt_in_place_detached(nonce, b"", &mut buffer)
+        
+        let mut ciphertext = plaintext.to_vec();
+        let tag = cipher.encrypt_in_place_detached(nonce, b"", &mut ciphertext)
             .map_err(|e| anyhow!("Encryption failed: {}", e))?;
 
         Ok(EncryptedMessage {
             nonce: nonce_bytes,
-            ciphertext: buffer,
+            ciphertext,
             tag: tag.into(),
         })
     }
@@ -438,7 +431,8 @@ impl CryptoManager {
         use hmac::{Hmac, Mac};
         type HmacSha256 = Hmac<Sha256>;
         
-        let mut mac = HmacSha256::new_from_slice(key)
+        // Fixed: Use specific KeyInit trait
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key)
             .expect("HMAC can take key of any size");
         mac.update(data);
         mac.finalize().into_bytes().into()
@@ -463,7 +457,7 @@ impl CryptoManager {
     /// Secure key derivation from password (for password-protected channels)
     pub fn derive_key_from_password(&self, password: &str, salt: &[u8]) -> Result<[u8; 32]> {
         use argon2::{Argon2, PasswordHasher};
-        use argon2::password_hash::{PasswordHasher as _, SaltString};
+        use argon2::password_hash::SaltString;
         
         if salt.len() < 16 {
             return Err(anyhow!("Salt too short: minimum 16 bytes required"));
@@ -484,6 +478,7 @@ impl CryptoManager {
         }
 
         let mut key = [0u8; 32];
+        // Fixed: Properly access hash bytes
         key.copy_from_slice(&hash_bytes.as_bytes()[..32]);
         Ok(key)
     }
@@ -576,7 +571,7 @@ mod tests {
         let key = crypto.generate_random_key();
         let plaintext = b"Hello, world!";
         
-        let encrypted = crypto.encrypt_with_key(plaintext, &key).unwrap();
+        let encrypted = crypto.encrypt_with_key(&key, plaintext).unwrap();
         let decrypted = crypto.decrypt_with_key(&encrypted, &key).unwrap();
         
         assert_eq!(plaintext, decrypted.as_slice());

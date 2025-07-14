@@ -48,7 +48,7 @@ impl CompatibilityManager {
     pub fn should_initiate_connection(&self, remote_peer_id: &str) -> bool {
         // Use lexicographic comparison - lower peer ID connects to higher
         // This ensures deterministic connection behavior across all platforms
-        let should_connect = self.my_peer_id < remote_peer_id;
+        let should_connect = self.my_peer_id.as_str() < remote_peer_id;
         debug!("Connection decision: {} {} {} = {}", 
                self.my_peer_id, 
                if should_connect { "<" } else { ">=" },

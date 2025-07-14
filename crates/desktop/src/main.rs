@@ -1,106 +1,106 @@
-﻿//! Bluetooth events and configuration for iOS/Android compatibility
+﻿//! BitChat Desktop Application
 
-use std::time::Instant;
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use bitchat_core::{
+    BitchatCore, Config, CommandProcessor, BitchatCommand, CommandResult,
+};
 
-/// Bluetooth event types for mesh networking
-#[derive(Debug, Clone)]
-pub enum BluetoothEvent {
-    /// A new peer has connected
-    PeerConnected { peer_id: String },
+async fn print_stats(processor: &Arc<CommandProcessor>) {
+    println!("📊 === BitChat Desktop Statistics ===");
     
-    /// A peer has disconnected
-    PeerDisconnected { peer_id: String },
-    
-    /// A message was received from a peer
-    MessageReceived { 
-        peer_id: String, 
-        data: Vec<u8> 
-    },
-    
-    /// Bluetooth adapter state changed
-    AdapterStateChanged { powered_on: bool },
-    
-    /// Scanning state changed
-    ScanningStateChanged { scanning: bool },
-    
-    /// Advertising state changed
-    AdvertisingStateChanged { advertising: bool },
-}
-
-/// Bluetooth configuration with iOS/Android compatibility
-#[derive(Debug, Clone)]
-pub struct BluetoothConfig {
-    /// Our peer ID (8 hex characters for iOS/Android compatibility)
-    pub peer_id: String,
-    
-    /// Maximum number of simultaneous connections
-    pub max_connections: usize,
-    
-    /// Scan timeout in seconds
-    pub scan_timeout: u64,
-    
-    /// Connection timeout in seconds
-    pub connection_timeout: u64,
-    
-    /// Enable automatic reconnection
-    pub auto_reconnect: bool,
-    
-    /// iOS/Android compatibility mode
-    pub ios_android_compatible: bool,
-}
-
-impl Default for BluetoothConfig {
-    fn default() -> Self {
-        Self {
-            peer_id: String::new(), // Will be generated
-            max_connections: 8, // Match iOS/Android limits
-            scan_timeout: 30,
-            connection_timeout: 10,
-            auto_reconnect: true,
-            ios_android_compatible: true, // Default to compatibility mode
+    if let Ok(CommandResult::PeerList { peers }) = processor.process_command(BitchatCommand::ListPeers).await {
+        println!("👥 Connected Peers: {}", peers.len());
+        for peer in peers.iter().take(5) {
+            println!("   - {}", peer);
         }
-    }
-}
-
-/// Information about a connected peer
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectedPeer {
-    /// Peer ID (8-character hex for iOS/Android compatibility)
-    pub peer_id: String,
-    
-    /// Device ID (platform-specific identifier)
-    pub device_id: String,
-    
-    /// When the connection was established
-    pub connected_at: Instant,
-    
-    /// Last time we heard from this peer
-    pub last_seen: Instant,
-}
-
-impl ConnectedPeer {
-    /// Get a short version of the peer ID for display (iOS/Android format)
-    pub fn short_id(&self) -> String {
-        if self.peer_id.len() >= 8 {
-            self.peer_id[..8].to_string()
-        } else {
-            self.peer_id.clone()
+        if peers.len() > 5 {
+            println!("   ... and {} more", peers.len() - 5);
         }
     }
     
-    /// Get connection duration
-    pub fn connection_duration(&self) -> std::time::Duration {
-        self.connected_at.elapsed()
+    if let Ok(CommandResult::ChannelList { channels }) = processor.process_command(BitchatCommand::ListChannels).await {
+        println!("💬 Joined Channels: {}", channels.len());
+        for channel in channels {
+            println!("   - #{}", channel);
+        }
     }
     
-    /// Get time since last activity
-    pub fn time_since_last_seen(&self) -> std::time::Duration {
-        self.last_seen.elapsed()
+    println!("==========================================\n");
+}
+
+async fn send_heartbeat(processor: &Arc<CommandProcessor>) {
+    let heartbeat_msg = format!("Desktop heartbeat - {}", chrono::Utc::now().format("%H:%M:%S"));
+    match processor.process_command(BitchatCommand::Message {
+        content: heartbeat_msg,
+        channel: Some("general".to_string()),
+        recipient: None,
+    }).await {
+        Ok(_) => println!("💓 Heartbeat sent to network"),
+        Err(e) => println!("❌ Failed to send heartbeat: {}", e),
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    println!("🖥️  BitChat Desktop v1.0.0");
+    println!("Starting desktop application...\n");
+
+    let mut config = Config::default();
+    config.max_peers = 50;
+    config.scan_interval_ms = 3000;
     
-    /// Check if this peer is from iOS/Android based on peer ID format
-    pub fn is_ios_android_peer(&self) -> bool {
-        self.peer_id.len() == 8 && self.peer_id.chars().all(|c| c.is_ascii_hexdigit())
+    println!("📡 Device Name: {}", config.device_name);
+    println!("💾 Data Directory: {}\n", config.data_dir.display());
+
+    let core = BitchatCore::new(config).await?;
+    let my_peer_id = core.get_peer_id();
+    
+    println!("🆔 Peer ID: {}", hex::encode(my_peer_id));
+    println!("🔄 Starting BitChat services...\n");
+
+    let processor = Arc::new(CommandProcessor::new(
+        core.bluetooth.clone(),
+        Arc::new(Mutex::new(core.crypto)),
+        Arc::new(core.storage),
+        Arc::new(core.config),
+        core.packet_router.clone(),
+        core.channel_manager.clone(),
+        my_peer_id,
+    ));
+
+    println!("✅ BitChat Desktop ready!");
+
+    // Auto-join general channel
+    if let Ok(CommandResult::Success { message }) = processor.process_command(BitchatCommand::Join {
+        channel: "general".to_string(),
+        password: None,
+    }).await {
+        println!("🔗 {}", message);
     }
+
+    if let Ok(CommandResult::Success { message }) = processor.process_command(BitchatCommand::SetNickname {
+        nickname: format!("Desktop-{}", &hex::encode(my_peer_id)[..4]),
+    }).await {
+        println!("👤 {}", message);
+    }
+
+    let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+
+    loop {
+        tokio::select! {
+            _ = stats_interval.tick() => print_stats(&processor).await,
+            _ = heartbeat_interval.tick() => send_heartbeat(&processor).await,
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n📡 Shutting down...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }

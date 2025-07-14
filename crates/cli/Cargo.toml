@@ -2,19 +2,28 @@
 name = "bitchat-cli"
 version = "0.1.0"
 edition = "2021"
-description = "SecureMesh CLI Application"
 
 [[bin]]
-name = "cli"
+name = "bitchat-cli"
 path = "src/main.rs"
 
 [dependencies]
-# Local dependencies
-bitchat-core = { path = "../core" }
+# Core BitChat library
+bitchat-core = { path = "../core", features = ["bluetooth"] }
 
-# Workspace dependencies
-tokio = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-clap = { workspace = true }
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
+# Utilities
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"

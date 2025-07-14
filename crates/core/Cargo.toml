@@ -49,4 +49,4 @@ dirs = "5.0"
 
 [features]
 default = ["bluetooth"]
-bluetooth = ["btleplug"]
+bluetooth = []

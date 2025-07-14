@@ -1,4 +1,6 @@
-﻿use serde::{Deserialize, Serialize};
+﻿// crates/core/src/config.rs - Fixed version
+
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,10 +25,19 @@ impl Default for Config {
             
         Self {
             data_dir,
-            device_name: format!("BitChat-{}", uuid::Uuid::new_v4().to_string()[..8].to_uppercase()),
+            // UPDATED: Generate 8-character hex ID to match Swift format exactly
+            device_name: generate_swift_compatible_peer_id(),
             auto_accept_channels: false,
             max_peers: 10,
             scan_interval_ms: 5000,
         }
     }
+}
+
+/// Generate peer ID in the same format as Swift (8 hex characters, uppercase)
+fn generate_swift_compatible_peer_id() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let bytes: [u8; 4] = rng.gen();
+    hex::encode(bytes).to_uppercase()
 }
