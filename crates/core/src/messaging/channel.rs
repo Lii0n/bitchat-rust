@@ -37,4 +37,12 @@ impl ChannelManager {
     pub fn get_current_channel(&self) -> Option<&String> {
         self.current_channel.as_ref()
     }
+
+    pub fn normalize_channel_name(channel: &str) -> String {
+        if channel.starts_with('#') {
+            channel.to_lowercase()
+        } else {
+            format!("#{}", channel.to_lowercase())
+        }
+    }
 }

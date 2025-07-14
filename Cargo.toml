@@ -48,3 +48,4 @@ fastrand = "2.0"
 
 # Optional features
 tokio-stream = "0.1"
+

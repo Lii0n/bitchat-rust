@@ -1,142 +1,271 @@
-﻿//! SecureMesh Core Library
+﻿//! BitChat Core Library
 //! 
-//! Core functionality for secure peer-to-peer messaging with iOS/Android compatibility
+//! This is the core library for BitChat, providing cryptographic, networking,
+//! and protocol functionality for secure peer-to-peer messaging.
 
-pub mod bluetooth;
+// Core modules
 pub mod crypto;
 pub mod protocol;
-pub mod messaging;
-pub mod commands;
+pub mod channel;
+pub mod commands; // Added commands module
 
-// Re-export important types for easier access
-pub use bluetooth::{BluetoothConnectionManager, BluetoothEvent, BluetoothConfig, ConnectedPeer};
-pub use messaging::{MessageManager, ChannelManager};
-pub use protocol::{PacketRouter};
+// Optional modules based on features
+#[cfg(feature = "bluetooth")]
+pub mod bluetooth;
 
-use anyhow::Result;
+// Re-export commonly used types
+pub use crypto::CryptoManager;
+pub use protocol::packet::{BitchatPacket, MessageType};
+pub use protocol::binary::BinaryProtocolManager;
+pub use channel::{ChannelManager, ChannelInfo};
+pub use commands::{CommandProcessor, BitchatCommand, CommandResult}; // Added command exports
+
+#[cfg(feature = "bluetooth")]
+pub use bluetooth::{BluetoothEvent, BluetoothConfig, BluetoothManager, CompatibilityManager};
+
+// Configuration and core types
+use serde::{Serialize, Deserialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::info;
+use tokio::sync::{Mutex, RwLock};
 
-/// Main SecureMesh core instance with iOS/Android compatibility
-pub struct SecureMeshCore {
-    bluetooth: Arc<RwLock<BluetoothConnectionManager>>,
-    message_manager: Arc<RwLock<MessageManager>>,
-    channel_manager: Arc<RwLock<ChannelManager>>,
-    packet_router: Arc<RwLock<PacketRouter>>,
-    my_peer_id: String,
+/// Main configuration for BitChat
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub device_name: String,
+    pub data_dir: String,
+    pub max_peers: usize,
+    pub enable_bluetooth: bool,
 }
 
-impl SecureMeshCore {
-    /// Create a new SecureMesh instance with iOS/Android compatibility
-    pub async fn new_with_compatibility() -> Result<Self> {
-        info!("🔐 Initializing SecureMesh with iOS/Android compatibility");
-        
-        // Create Bluetooth manager with iOS/Android compatibility
-        let bluetooth_manager = BluetoothConnectionManager::new_with_compatibility().await?;
-        let my_peer_id = bluetooth_manager.get_peer_id().to_string();
-        
-        info!("✅ SecureMesh initialized with iOS/Android compatible peer ID: {}", my_peer_id);
-        
-        let bluetooth = Arc::new(RwLock::new(bluetooth_manager));
-        let message_manager = Arc::new(RwLock::new(MessageManager::new()));
-        let channel_manager = Arc::new(RwLock::new(ChannelManager::new()));
-        let packet_router = Arc::new(RwLock::new(PacketRouter::new()));
-        
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            device_name: "BitChat-Device".to_string(),
+            data_dir: dirs::data_dir()
+                .unwrap_or_else(|| std::env::current_dir().unwrap())
+                .join("bitchat")
+                .to_string_lossy()
+                .to_string(),
+            max_peers: 100,
+            enable_bluetooth: true,
+        }
+    }
+}
+
+/// Storage abstraction
+#[derive(Debug)]
+pub struct Storage {
+    data_dir: String,
+}
+
+impl Storage {
+    pub fn new(data_dir: &str) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(data_dir)?;
         Ok(Self {
-            bluetooth,
-            message_manager,
-            channel_manager,
-            packet_router,
-            my_peer_id,
+            data_dir: data_dir.to_string(),
         })
     }
     
-    /// Start the mesh networking services
-    pub async fn start(&self) -> Result<()> {
-        info!("🚀 Starting SecureMesh services");
-        
-        let mut bluetooth = self.bluetooth.write().await;
-        bluetooth.start().await?;
-        
-        // Start event processing
-        self.start_event_processing().await?;
-        
-        info!("✅ SecureMesh services started successfully - ready for iOS/Android connections");
-        Ok(())
+    pub fn data_dir(&self) -> &str {
+        &self.data_dir
+    }
+}
+
+/// Peer management
+#[derive(Debug)]
+pub struct PeerManager {
+    peers: std::collections::HashMap<[u8; 8], PeerInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub peer_id: [u8; 8],
+    pub nickname: Option<String>,
+    pub last_seen: u64,
+    pub connection_count: u32,
+}
+
+impl PeerManager {
+    pub fn new() -> Self {
+        Self {
+            peers: std::collections::HashMap::new(),
+        }
     }
     
-    /// Start processing Bluetooth events
-    async fn start_event_processing(&self) -> Result<()> {
-        // TODO: Implement event processing loop
-        // This would handle BluetoothEvent::PeerConnected, PeerDisconnected, etc.
-        info!("📡 Event processing started");
-        Ok(())
+    pub fn add_peer(&mut self, peer_id: [u8; 8], nickname: Option<String>) {
+        let info = PeerInfo {
+            peer_id,
+            nickname,
+            last_seen: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            connection_count: 1,
+        };
+        self.peers.insert(peer_id, info);
     }
     
-    /// Send a message to a specific peer
-    pub async fn send_message(&self, recipient: &str, content: &str) -> Result<()> {
-        info!("📤 Sending message to {}: {}", recipient, content);
-        
-        // Create message packet
-        let message_data = content.as_bytes();
-        
-        // Send via Bluetooth
-        let bluetooth = self.bluetooth.read().await;
-        bluetooth.broadcast_message(message_data).await?;
-        
-        Ok(())
+    pub fn get_peers(&self) -> Vec<&PeerInfo> {
+        self.peers.values().collect()
     }
     
-    /// Broadcast a message to all connected peers
-    pub async fn broadcast_message(&self, content: &str) -> Result<()> {
-        info!("📢 Broadcasting message: {}", content);
-        
-        let message_data = content.as_bytes();
-        
-        let bluetooth = self.bluetooth.read().await;
-        bluetooth.broadcast_message(message_data).await?;
-        
-        Ok(())
+    pub fn remove_peer(&mut self, peer_id: &[u8; 8]) -> bool {
+        self.peers.remove(peer_id).is_some()
+    }
+}
+
+/// Packet routing
+#[derive(Debug)]
+pub struct PacketRouter {
+    my_peer_id: [u8; 8],
+    routing_table: std::collections::HashMap<[u8; 8], [u8; 8]>, // dest -> next_hop
+}
+
+impl PacketRouter {
+    pub fn new(my_peer_id: [u8; 8]) -> Self {
+        Self { 
+            my_peer_id,
+            routing_table: std::collections::HashMap::new(),
+        }
     }
     
-    /// Join a channel
-    pub async fn join_channel(&self, channel: &str) -> Result<String> {
-        info!("📂 Joining channel: {}", channel);
+    pub fn add_route(&mut self, dest: [u8; 8], next_hop: [u8; 8]) {
+        self.routing_table.insert(dest, next_hop);
+    }
+    
+    pub fn get_next_hop(&self, dest: &[u8; 8]) -> Option<[u8; 8]> {
+        self.routing_table.get(dest).copied()
+    }
+    
+    pub fn my_peer_id(&self) -> [u8; 8] {
+        self.my_peer_id
+    }
+}
+
+/// Main BitChat core structure
+pub struct BitchatCore {
+    #[cfg(feature = "bluetooth")]
+    pub bluetooth: Arc<Mutex<BluetoothManager>>,
+    pub crypto: CryptoManager,
+    pub peer_manager: PeerManager,
+    pub storage: Storage,
+    pub config: Config,
+    pub packet_router: Arc<RwLock<PacketRouter>>,
+    pub channel_manager: Arc<Mutex<ChannelManager>>,
+    pub my_peer_id: [u8; 8],
+}
+
+// Manual Debug implementation to handle the conditional bluetooth field
+impl std::fmt::Debug for BitchatCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug_struct = f.debug_struct("BitchatCore");
         
-        let mut cm = self.channel_manager.write().await;
-        let joined = cm.join_channel(channel);
+        #[cfg(feature = "bluetooth")]
+        debug_struct.field("bluetooth", &"Arc<Mutex<BluetoothManager>>");
+        
+        debug_struct
+            .field("crypto", &"CryptoManager")
+            .field("peer_manager", &self.peer_manager)
+            .field("storage", &self.storage)
+            .field("config", &self.config)
+            .field("packet_router", &"Arc<RwLock<PacketRouter>>")
+            .field("channel_manager", &"Arc<Mutex<ChannelManager>>")
+            .field("my_peer_id", &hex::encode(self.my_peer_id))
+            .finish()
+    }
+}
+
+impl BitchatCore {
+    pub async fn new(config: Config) -> anyhow::Result<Self> {
+        let storage = Storage::new(&config.data_dir)?;
+        let crypto = CryptoManager::new()?;
+        let peer_manager = PeerManager::new();
+        
+        // Generate our peer ID from device name
+        let my_peer_id = crypto::utils::peer_id_from_device_name(&config.device_name);
+        
+        // Create packet router and channel manager
+        let packet_router = Arc::new(RwLock::new(PacketRouter::new(my_peer_id)));
+        let channel_manager = Arc::new(Mutex::new(ChannelManager::new()));
+        
+        #[cfg(feature = "bluetooth")]
+        let bluetooth = {
+            let bluetooth_config = BluetoothConfig::default()
+                .with_device_name(config.device_name.clone());
+            let bluetooth_manager = BluetoothManager::with_config(bluetooth_config).await?;
+            Arc::new(Mutex::new(bluetooth_manager))
+        };
+
+        Ok(Self {
+            #[cfg(feature = "bluetooth")]
+            bluetooth,
+            crypto,
+            peer_manager,
+            storage,
+            config,
+            packet_router,
+            channel_manager,
+            my_peer_id,
+        })
+    }
+
+    /// Join a channel and announce it
+    pub async fn join_channel(&self, channel: &str) -> anyhow::Result<String> {
+        let joined = {
+            let mut cm = self.channel_manager.lock().await;
+            cm.join_channel(channel)?
+        };
         
         if joined {
-            // Announce channel join to network
-            let join_message = format!("joined {}", channel);
-            self.broadcast_message(&join_message).await?;
+            #[cfg(feature = "bluetooth")]
+            {
+                // Send channel join packet
+                let packet = BinaryProtocolManager::create_channel_join_packet(
+                    self.my_peer_id,
+                    channel,
+                )?;
+                
+                let data = BinaryProtocolManager::encode(&packet)?;
+                let bluetooth = self.bluetooth.lock().await;
+                bluetooth.broadcast_message(&data).await?;
+            }
+            
             Ok(format!("Joined channel {}", channel))
         } else {
             Ok(format!("Already in channel {}", channel))
         }
     }
-    
-    /// Leave a channel
-    pub async fn leave_channel(&self, channel: &str) -> Result<String> {
-        info!("📂 Leaving channel: {}", channel);
-        
-        let mut cm = self.channel_manager.write().await;
-        let left = cm.leave_channel(channel);
+
+    /// Leave a channel and announce it
+    pub async fn leave_channel(&self, channel: &str) -> anyhow::Result<String> {
+        let left = {
+            let mut cm = self.channel_manager.lock().await;
+            cm.leave_channel(channel)?
+        };
         
         if left {
-            // Announce channel leave to network
-            let leave_message = format!("left {}", channel);
-            self.broadcast_message(&leave_message).await?;
+            #[cfg(feature = "bluetooth")]
+            {
+                // Send channel leave packet
+                let packet = BinaryProtocolManager::create_channel_leave_packet(
+                    self.my_peer_id,
+                    channel,
+                )?;
+                
+                let data = BinaryProtocolManager::encode(&packet)?;
+                let bluetooth = self.bluetooth.lock().await;
+                bluetooth.broadcast_message(&data).await?;
+            }
+            
             Ok(format!("Left channel {}", channel))
         } else {
             Ok(format!("Not in channel {}", channel))
         }
     }
-    
+
     /// List joined channels
-    pub async fn list_channels(&self) -> Result<String> {
-        let cm = self.channel_manager.read().await;
+    pub async fn list_channels(&self) -> anyhow::Result<String> {
+        let cm = self.channel_manager.lock().await;
         let channels = cm.get_joined_channels();
         let current = cm.get_current_channel();
         
@@ -151,73 +280,45 @@ impl SecureMeshCore {
             Ok(result)
         }
     }
-    
-    /// Get connected peers (iOS/Android compatible)
-    pub async fn get_connected_peers(&self) -> Vec<String> {
-        let bluetooth = self.bluetooth.read().await;
-        bluetooth.get_connected_peers().await
-    }
-    
-    /// Get detailed connected peer information
-    pub async fn get_connected_peer_info(&self) -> Vec<ConnectedPeer> {
-        let bluetooth = self.bluetooth.read().await;
-        let peer_ids = bluetooth.get_connected_peers().await;
-        
-        // TODO: Get actual peer info from bluetooth manager
-        // For now return empty list
-        vec![]
-    }
-    
-    /// Get debug information including iOS/Android compatibility status
-    pub async fn get_debug_info(&self) -> String {
-        let bluetooth = self.bluetooth.read().await;
-        bluetooth.get_debug_info_with_compatibility().await
-    }
-    
-    /// Get peer ID (iOS/Android compatible format)
-    pub fn get_peer_id(&self) -> &str {
-        &self.my_peer_id
-    }
-    
-    /// Check if we're connected to any iOS/Android devices
-    pub async fn has_ios_android_connections(&self) -> bool {
-        let bluetooth = self.bluetooth.read().await;
-        let peer_count = bluetooth.get_connected_count().await;
-        peer_count > 0
-    }
-    
-    /// Get connection status
-    pub async fn get_connection_status(&self) -> String {
-        let bluetooth = self.bluetooth.read().await;
-        let peer_count = bluetooth.get_connected_count().await;
-        let is_scanning = bluetooth.is_scanning().await;
-        let is_advertising = bluetooth.is_advertising().await;
-        
-        format!(
-            "📊 Connection Status:\n\
-            Peer ID: {} (iOS/Android compatible)\n\
-            Connected Peers: {}\n\
-            Scanning: {}\n\
-            Advertising: {}\n\
-            Ready for iOS/Android connections: {}",
+
+    /// Send a channel message
+    pub async fn send_channel_message(&self, channel: &str, content: &str) -> anyhow::Result<()> {
+        // Create message with channel info in payload
+        let payload = format!("{}|{}", channel, content);
+        let packet = BinaryProtocolManager::create_message_packet(
             self.my_peer_id,
-            peer_count,
-            if is_scanning { "✅" } else { "❌" },
-            if is_advertising { "✅" } else { "❌" },
-            if is_scanning && is_advertising { "✅" } else { "❌" }
-        )
-    }
-    
-    /// Stop all services
-    pub async fn stop(&self) -> Result<()> {
-        info!("🛑 Stopping SecureMesh services");
+            None, // Broadcast to channel
+            &payload,
+        )?;
+
+        #[cfg(feature = "bluetooth")]
+        {
+            let data = BinaryProtocolManager::encode(&packet)?;
+            let bluetooth = self.bluetooth.lock().await;
+            bluetooth.broadcast_message(&data).await?;
+        }
         
-        // TODO: Implement proper shutdown
-        // - Stop scanning and advertising
-        // - Disconnect from all peers
-        // - Clean up resources
+        #[cfg(not(feature = "bluetooth"))]
+        {
+            // Log the message when bluetooth is disabled
+            tracing::info!("Would send to channel {}: {}", channel, content);
+        }
         
-        info!("✅ SecureMesh services stopped");
         Ok(())
+    }
+
+    /// Get peer information
+    pub fn get_peers(&self) -> Vec<&PeerInfo> {
+        self.peer_manager.get_peers()
+    }
+
+    /// Add a new peer
+    pub fn add_peer(&mut self, peer_id: [u8; 8], nickname: Option<String>) {
+        self.peer_manager.add_peer(peer_id, nickname);
+    }
+
+    /// Remove a peer
+    pub fn remove_peer(&mut self, peer_id: &[u8; 8]) -> bool {
+        self.peer_manager.remove_peer(peer_id)
     }
 }

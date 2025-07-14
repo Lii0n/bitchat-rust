@@ -96,12 +96,12 @@ impl BinaryProtocolManager {
             None
         };
 
-        // Parse payload
+        // Parse payload (variable length)
         if buffer.remaining() < payload_length {
             return Err(anyhow!("Not enough data for payload"));
         }
-        let mut payload = vec![0u8; payload_length];
-        buffer.copy_to_slice(&mut payload);
+        let payload = buffer[..payload_length].to_vec();
+        buffer.advance(payload_length);
 
         // Parse optional signature (64 bytes)
         let signature = if flags & flags::HAS_SIGNATURE != 0 {
@@ -138,17 +138,83 @@ impl BinaryProtocolManager {
         Ok(packet)
     }
 
+    // ============================================================================
+    // REFACTORED PACKET CREATION - Generic builders to reduce redundancy
+    // ============================================================================
+
+    /// Generic packet creator for broadcast messages with string payloads
+    /// This eliminates repetitive code in channel/announce packet creation
+    fn create_broadcast_packet_with_string_payload(
+        message_type: MessageType,
+        sender_id: [u8; 8],
+        payload_str: &str,
+    ) -> Result<BitchatPacket> {
+        let payload = payload_str.as_bytes().to_vec();
+        Ok(BitchatPacket::new_broadcast(
+            message_type,
+            sender_id,
+            payload,
+        ))
+    }
+
+    /// Generic packet creator for direct messages with string payloads
+    fn create_direct_packet_with_string_payload(
+        message_type: MessageType,
+        sender_id: [u8; 8],
+        recipient_id: [u8; 8],
+        payload_str: &str,
+    ) -> Result<BitchatPacket> {
+        let payload = payload_str.as_bytes().to_vec();
+        Ok(BitchatPacket::new_direct(
+            message_type,
+            sender_id,
+            recipient_id,
+            payload,
+        ))
+    }
+
+    /// Generic packet creator for broadcast messages with byte payloads
+    fn create_broadcast_packet_with_bytes(
+        message_type: MessageType,
+        sender_id: [u8; 8],
+        payload: Vec<u8>,
+    ) -> Result<BitchatPacket> {
+        Ok(BitchatPacket::new_broadcast(
+            message_type,
+            sender_id,
+            payload,
+        ))
+    }
+
+    /// Generic packet creator for direct messages with byte payloads
+    fn create_direct_packet_with_bytes(
+        message_type: MessageType,
+        sender_id: [u8; 8],
+        recipient_id: [u8; 8],
+        payload: Vec<u8>,
+    ) -> Result<BitchatPacket> {
+        Ok(BitchatPacket::new_direct(
+            message_type,
+            sender_id,
+            recipient_id,
+            payload,
+        ))
+    }
+
+    // ============================================================================
+    // SIMPLIFIED PACKET CREATORS - Now use generic builders
+    // ============================================================================
+
     /// Create an ANNOUNCE packet (used for peer discovery)
     pub fn create_announce_packet(
         sender_id: [u8; 8],
         nickname: &str,
     ) -> Result<BitchatPacket> {
-        let payload = nickname.as_bytes().to_vec();
-        Ok(BitchatPacket::new_broadcast(
+        Self::create_broadcast_packet_with_string_payload(
             MessageType::Announce,
             sender_id,
-            payload,
-        ))
+            nickname,
+        )
     }
 
     /// Create a MESSAGE packet (chat message)
@@ -157,30 +223,28 @@ impl BinaryProtocolManager {
         recipient_id: Option<[u8; 8]>,
         content: &str,
     ) -> Result<BitchatPacket> {
-        let payload = content.as_bytes().to_vec();
-        
         match recipient_id {
-            Some(recipient) => Ok(BitchatPacket::new_direct(
+            Some(recipient) => Self::create_direct_packet_with_string_payload(
                 MessageType::Message,
                 sender_id,
                 recipient,
-                payload,
-            )),
-            None => Ok(BitchatPacket::new_broadcast(
+                content,
+            ),
+            None => Self::create_broadcast_packet_with_string_payload(
                 MessageType::Message,
                 sender_id,
-                payload,
-            )),
+                content,
+            ),
         }
     }
 
     /// Create a LEAVE packet (peer leaving)
     pub fn create_leave_packet(sender_id: [u8; 8]) -> Result<BitchatPacket> {
-        Ok(BitchatPacket::new_broadcast(
+        Self::create_broadcast_packet_with_bytes(
             MessageType::Leave,
             sender_id,
             Vec::new(),
-        ))
+        )
     }
 
     /// Create a KEY_EXCHANGE packet (for encryption setup)
@@ -189,41 +253,39 @@ impl BinaryProtocolManager {
         recipient_id: [u8; 8],
         public_key: &[u8],
     ) -> Result<BitchatPacket> {
-        Ok(BitchatPacket::new_direct(
+        Self::create_direct_packet_with_bytes(
             MessageType::KeyExchange,
             sender_id,
             recipient_id,
             public_key.to_vec(),
-        ))
+        )
     }
 
-    /// Create a CHANNEL_JOIN packet (NEW)
+    /// Create a CHANNEL_JOIN packet
     pub fn create_channel_join_packet(
         sender_id: [u8; 8],
         channel: &str,
     ) -> Result<BitchatPacket> {
-        let payload = channel.as_bytes().to_vec();
-        Ok(BitchatPacket::new_broadcast(
+        Self::create_broadcast_packet_with_string_payload(
             MessageType::ChannelJoin,
             sender_id,
-            payload,
-        ))
+            channel,
+        )
     }
 
-    /// Create a CHANNEL_LEAVE packet (NEW)
+    /// Create a CHANNEL_LEAVE packet
     pub fn create_channel_leave_packet(
         sender_id: [u8; 8],
         channel: &str,
     ) -> Result<BitchatPacket> {
-        let payload = channel.as_bytes().to_vec();
-        Ok(BitchatPacket::new_broadcast(
+        Self::create_broadcast_packet_with_string_payload(
             MessageType::ChannelLeave,
             sender_id,
-            payload,
-        ))
+            channel,
+        )
     }
 
-    /// Create a CHANNEL_ANNOUNCE packet (NEW)
+    /// Create a CHANNEL_ANNOUNCE packet
     pub fn create_channel_announce_packet(
         sender_id: [u8; 8],
         channel: &str,
@@ -236,16 +298,15 @@ impl BinaryProtocolManager {
         let creator = creator_id.unwrap_or("");
         let commitment = key_commitment.unwrap_or("");
         let payload_str = format!("{}|{}|{}|{}", channel, protected_flag, creator, commitment);
-        let payload = payload_str.as_bytes().to_vec();
         
-        Ok(BitchatPacket::new_broadcast(
+        Self::create_broadcast_packet_with_string_payload(
             MessageType::ChannelAnnounce,
             sender_id,
-            payload,
-        ))
+            &payload_str,
+        )
     }
 
-    /// Create a CHANNEL_RETENTION packet (NEW)
+    /// Create a CHANNEL_RETENTION packet
     pub fn create_channel_retention_packet(
         sender_id: [u8; 8],
         channel: &str,
@@ -255,13 +316,12 @@ impl BinaryProtocolManager {
         // Payload format: channel|enabled|creatorID
         let enabled_flag = if enabled { "1" } else { "0" };
         let payload_str = format!("{}|{}|{}", channel, enabled_flag, creator_id);
-        let payload = payload_str.as_bytes().to_vec();
         
-        Ok(BitchatPacket::new_broadcast(
+        Self::create_broadcast_packet_with_string_payload(
             MessageType::ChannelRetention,
             sender_id,
-            payload,
-        ))
+            &payload_str,
+        )
     }
 
     /// Validate packet integrity
@@ -433,5 +493,24 @@ mod tests {
         
         let short_id = peer_utils::short_peer_id(&peer_id);
         assert_eq!(short_id, "01234567");
+    }
+
+    #[test]
+    fn test_channel_announce_packet() {
+        let sender_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        let channel = "#test";
+        let creator = "alice";
+        
+        let packet = BinaryProtocolManager::create_channel_announce_packet(
+            sender_id,
+            channel,
+            true, // is_protected
+            Some(creator),
+            Some("commitment123"),
+        ).unwrap();
+
+        assert_eq!(packet.message_type, MessageType::ChannelAnnounce);
+        let payload_str = String::from_utf8(packet.payload).unwrap();
+        assert_eq!(payload_str, "#test|1|alice|commitment123");
     }
 }
