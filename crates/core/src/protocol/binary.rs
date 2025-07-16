@@ -1108,7 +1108,7 @@ fn bytes_to_peer_id(bytes: &[u8; 8]) -> String {
     hex::encode(bytes).to_uppercase()
 }
 
-/// Peer ID utilities
+/// Peer ID utilities - Add these functions to the existing peer_utils module
 pub mod peer_utils {
     use rand::Rng;
     use std::hash::{Hash, Hasher};
@@ -1149,41 +1149,49 @@ pub mod peer_utils {
         peer_id
     }
     
-    /// Generate a compatible peer ID string
+    /// Generate a compatible peer ID string (for iOS/Android compatibility)
     pub fn generate_compatible_peer_id() -> String {
         let peer_id = generate_peer_id();
         peer_id_to_string(&peer_id)
     }
     
+    /// Generate peer ID from device info (deterministic)
+    pub fn peer_id_from_device_info(device_info: &str) -> String {
+        let peer_bytes = peer_id_from_device_name(device_info);
+        peer_id_to_string(&peer_bytes)
+    }
+    
     /// Check if peer ID string is valid
     pub fn is_valid_peer_id_string(peer_id: &str) -> bool {
-        if peer_id.len() != 16 {
-            return false;
+        peer_id.len() == 16 && 
+        peer_id.chars().all(|c| c.is_ascii_hexdigit())
+    }
+    
+    /// Convert peer ID string to bytes with error handling
+    pub fn peer_id_string_to_bytes(peer_id: &str) -> Result<[u8; 8], String> {
+        if !is_valid_peer_id_string(peer_id) {
+            return Err(format!("Invalid peer ID format: {}", peer_id));
         }
-        hex::decode(peer_id).is_ok()
-    }
-    
-    /// Convert peer ID string to bytes
-    pub fn peer_id_string_to_bytes(peer_id: &str) -> Option<[u8; 8]> {
-        string_to_peer_id(peer_id)
-    }
-    
-    /// Generate peer ID from device info
-    pub fn peer_id_from_device_info(device_info: &str) -> String {
-        let peer_id = peer_id_from_device_name(device_info);
-        peer_id_to_string(&peer_id)
+        
+        let decoded = hex::decode(peer_id)
+            .map_err(|e| format!("Failed to decode peer ID: {}", e))?;
+        
+        if decoded.len() != 8 {
+            return Err(format!("Peer ID must be 8 bytes, got {}", decoded.len()));
+        }
+        
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&decoded);
+        Ok(bytes)
     }
     
     /// Extract peer ID from device name
-    pub fn extract_peer_id_from_device_name(name: &str) -> Option<[u8; 8]> {
-        // Look for hex pattern in device name
-        if name.len() >= 16 {
-            if let Ok(decoded) = hex::decode(&name[..16]) {
-                if decoded.len() == 8 {
-                    let mut peer_id = [0u8; 8];
-                    peer_id.copy_from_slice(&decoded);
-                    return Some(peer_id);
-                }
+    pub fn extract_peer_id_from_device_name(device_name: &str) -> Option<String> {
+        // Check for BitChat format: "BC_ABCD1234EFGH5678" 
+        if device_name.starts_with("BC_") && device_name.len() == 19 { // BC_ + 16 hex chars
+            let peer_id = &device_name[3..];
+            if is_valid_peer_id_string(peer_id) {
+                return Some(peer_id.to_uppercase());
             }
         }
         None
@@ -1191,12 +1199,12 @@ pub mod peer_utils {
     
     /// Create advertisement name from peer ID
     pub fn create_advertisement_name(peer_id: &str) -> String {
-        format!("BitChat-{}", &peer_id[..8])
+        format!("BC_{}", peer_id)
     }
     
-    /// Determine connection priority (avoid dual connections)
-    pub fn should_initiate_connection(our_id: &str, their_id: &str) -> bool {
-        our_id < their_id
+    /// Determine if we should initiate connection based on peer ID comparison
+    pub fn should_initiate_connection(my_peer_id: &str, remote_peer_id: &str) -> bool {
+        my_peer_id < remote_peer_id
     }
 }
 

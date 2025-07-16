@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tracing::info;
+use std::io::Write;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -153,7 +154,7 @@ async fn start_interactive_mode(core: BitchatCore) -> anyhow::Result<()> {
     
     loop {
         print!("bitchat> ");
-        io::Write::flush(&mut io::stdout())?;
+        Write::flush(&mut std::io::stdout())?;
         line.clear();
         
         match reader.read_line(&mut line).await {

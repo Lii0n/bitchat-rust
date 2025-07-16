@@ -1,14 +1,18 @@
+// ==============================================================================
+// crates/core/src/bluetooth/config.rs
+// ==============================================================================
+
 //! Bluetooth configuration for BitChat
 
-use crate::protocol::peer_utils;
+use crate::bluetooth::constants::peer_id;
 use std::time::Duration;
 
 /// Configuration for Bluetooth operations
 #[derive(Debug, Clone)]
 pub struct BluetoothConfig {
-    /// Device name for Bluetooth advertising
+    /// Device name for Bluetooth advertising (peer ID format)
     pub device_name: String,
-    /// Peer ID in bytes
+    /// Peer ID in bytes  
     pub peer_id: [u8; 8],
     /// Maximum number of connections
     pub max_connections: usize,
@@ -26,9 +30,9 @@ pub struct BluetoothConfig {
 
 impl Default for BluetoothConfig {
     fn default() -> Self {
-        let peer_id_string = peer_utils::generate_compatible_peer_id();
-        let peer_id_bytes = peer_utils::peer_id_string_to_bytes(&peer_id_string)
-            .unwrap_or_else(|| [0u8; 8]);
+        let peer_id_string = peer_id::generate_random_peer_id();
+        let peer_id_bytes = peer_id::string_to_bytes(&peer_id_string)
+            .unwrap_or_else(|_| [0u8; 8]);
 
         Self {
             device_name: peer_id_string,
@@ -46,7 +50,8 @@ impl Default for BluetoothConfig {
 impl BluetoothConfig {
     /// Create new config with device name (builder pattern)
     pub fn with_device_name(device_name: String) -> Self {
-        let peer_id_bytes = peer_utils::peer_id_from_device_name(&device_name);
+        let peer_id_bytes = peer_id::string_to_bytes(&device_name)
+            .unwrap_or_else(|_| [0u8; 8]);
         
         Self {
             device_name,
@@ -63,7 +68,8 @@ impl BluetoothConfig {
     /// Set device name on existing config
     pub fn set_device_name(&mut self, device_name: String) {
         self.device_name = device_name.clone();
-        self.peer_id = peer_utils::peer_id_from_device_name(&device_name);
+        self.peer_id = peer_id::string_to_bytes(&device_name)
+            .unwrap_or_else(|_| [0u8; 8]);
     }
     
     /// Set max connections
@@ -84,7 +90,7 @@ impl BluetoothConfig {
             return Err("Device name cannot be empty".to_string());
         }
         
-        if !peer_utils::is_valid_peer_id_string(&self.device_name) {
+        if !peer_id::is_valid_peer_id_string(&self.device_name) {
             return Err("Invalid device name format".to_string());
         }
         
@@ -97,11 +103,11 @@ impl BluetoothConfig {
     
     /// Get advertisement name for Bluetooth
     pub fn advertisement_name(&self) -> String {
-        peer_utils::create_advertisement_name(&self.device_name)
+        format!("BC_{}", self.device_name)
     }
     
     /// Get peer ID as string
     pub fn peer_id_string(&self) -> String {
-        peer_utils::peer_id_to_string(&self.peer_id)
+        peer_id::bytes_to_string(&self.peer_id)
     }
 }

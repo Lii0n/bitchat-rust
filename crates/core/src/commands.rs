@@ -1,6 +1,6 @@
 ﻿//! Command handling for BitChat operations
 
-use crate::{BitchatCore, BinaryProtocol, MessageType};
+use crate::BitchatCore;
 use anyhow::Result;
 use std::sync::Arc;
 

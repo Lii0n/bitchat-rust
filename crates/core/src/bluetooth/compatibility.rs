@@ -1,11 +1,13 @@
-// Replace crates/core/src/bluetooth/compatibility.rs
+// ==============================================================================
+// crates/core/src/bluetooth/compatibility.rs
+// ==============================================================================
 
 //! Compatibility layer for connecting Rust devices to existing iOS/Android mesh
 //! 
 //! This module implements connection arbitration logic that prevents dual role conflicts
 //! by ensuring deterministic connection behavior compatible with iOS/Android implementations.
 
-use crate::protocol::peer_utils;
+use crate::bluetooth::constants::peer_id;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use std::sync::Arc;
@@ -39,11 +41,11 @@ impl CompatibilityManager {
     /// Create new compatibility manager with iOS/Android compatible peer ID
     pub fn new(my_peer_id: String) -> Self {
         // Ensure peer ID is in correct format
-        let formatted_peer_id = if peer_utils::is_valid_peer_id_string(&my_peer_id) {
+        let formatted_peer_id = if peer_id::is_valid_peer_id_string(&my_peer_id) {
             my_peer_id.to_uppercase()
         } else {
             warn!("Invalid peer ID format '{}', generating new one", my_peer_id);
-            peer_utils::generate_compatible_peer_id()
+            peer_id::generate_random_peer_id()
         };
         
         info!("Initializing iOS/Android compatibility manager with peer ID: {}", formatted_peer_id);
@@ -58,14 +60,24 @@ impl CompatibilityManager {
     
     /// Create compatibility manager from device info (deterministic)
     pub fn from_device_info(device_info: &str) -> Self {
-        let peer_id = peer_utils::peer_id_from_device_info(device_info);
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        device_info.hash(&mut hasher);
+        let hash = hasher.finish();
+        
+        let mut peer_bytes = [0u8; 8];
+        peer_bytes.copy_from_slice(&hash.to_be_bytes());
+        let peer_id = peer_id::bytes_to_string(&peer_bytes);
+        
         Self::new(peer_id)
     }
     
     /// Determine if we should connect to this peer based on peer ID comparison
     /// This is the key to avoiding dual role conflicts with iOS/Android
     pub fn should_initiate_connection(&self, remote_peer_id: &str) -> bool {
-        let should_connect = peer_utils::should_initiate_connection(&self.my_peer_id, remote_peer_id);
+        let should_connect = self.my_peer_id.as_str() < remote_peer_id;
         debug!("Connection decision: {} {} {} = {}", 
                self.my_peer_id, 
                if should_connect { "<" } else { ">=" },
@@ -85,7 +97,7 @@ impl CompatibilityManager {
     ) -> Option<String> {
         // Extract peer ID from device name (8-character format used by iOS/Android)
         let peer_id = match device_name.as_ref().and_then(|name| {
-            peer_utils::extract_peer_id_from_device_name(name)
+            extract_peer_id_from_device_name(name)
         }) {
             Some(id) => id,
             None => {
@@ -207,7 +219,7 @@ impl CompatibilityManager {
     
     /// Create advertisement name compatible with iOS/Android
     pub fn create_advertisement_name(&self) -> String {
-        peer_utils::create_advertisement_name(&self.my_peer_id)
+        format!("BC_{}", self.my_peer_id)
     }
     
     /// Determine if we should retry connection
@@ -314,4 +326,16 @@ impl CompatibilityManager {
             .map(|device| (device.peer_id.clone(), device.rssi, device.last_seen.elapsed()))
             .collect()
     }
+}
+
+/// Extract peer ID from device name
+fn extract_peer_id_from_device_name(device_name: &str) -> Option<String> {
+    // Check for BitChat format: "BC_ABCD1234" 
+    if device_name.starts_with("BC_") && device_name.len() == 19 { // BC_ + 16 hex chars
+        let peer_id = &device_name[3..];
+        if peer_id::is_valid_peer_id_string(peer_id) {
+            return Some(peer_id.to_uppercase());
+        }
+    }
+    None
 }

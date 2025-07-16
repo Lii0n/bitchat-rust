@@ -1,11 +1,12 @@
-// Replace crates/core/src/bluetooth/events.rs
+// ==============================================================================
+// crates/core/src/bluetooth/events.rs
+// ==============================================================================
 
 //! Bluetooth events for BitChat mesh networking
 
 use serde::{Deserialize, Serialize};
-use crate::protocol::BitchatPacket;
 
-/// Events emitted by the Bluetooth manager
+/// Events emitted by the Bluetooth manager  
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BluetoothEvent {
     /// Bluetooth adapter state changed
@@ -41,7 +42,8 @@ pub enum BluetoothEvent {
     /// Packet received from peer
     PacketReceived {
         peer_id: String,
-        packet: BitchatPacket,
+        packet_size: usize,
+        message_type: String,
     },
     
     /// Packet send failed
@@ -132,8 +134,8 @@ impl BluetoothEvent {
             BluetoothEvent::ConnectionFailed { peer_id, error } => {
                 format!("Connection failed to {}: {}", peer_id, error)
             }
-            BluetoothEvent::PacketReceived { peer_id, packet } => {
-                format!("Received {:?} from {}", packet.message_type, peer_id)
+            BluetoothEvent::PacketReceived { peer_id, message_type, packet_size } => {
+                format!("Received {} ({} bytes) from {}", message_type, packet_size, peer_id)
             }
             BluetoothEvent::PacketSendFailed { peer_id, error } => {
                 format!("Send failed to {}: {}", peer_id, error)
@@ -171,7 +173,7 @@ pub struct LoggingEventListener;
 
 impl BluetoothEventListener for LoggingEventListener {
     fn handle_event(&self, event: BluetoothEvent) {
-        use tracing::{info, warn, error};
+        use tracing::{info, error};
         
         match &event {
             BluetoothEvent::Error { .. } | BluetoothEvent::ConnectionFailed { .. } | BluetoothEvent::PacketSendFailed { .. } => {

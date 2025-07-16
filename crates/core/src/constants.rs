@@ -1,4 +1,4 @@
-//! Constants used throughout BitChat
+//! Global constants for BitChat
 
 use uuid::Uuid;
 use std::time::Duration;
@@ -12,33 +12,6 @@ pub mod service_uuids {
     
     /// BitChat characteristic UUID for data exchange
     pub const BITCHAT_CHARACTERISTIC: Uuid = uuid::uuid!("A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D");
-}
-
-/// Peer ID related constants and utilities
-pub mod peer_id {
-    /// Check if a peer ID string is valid format
-    pub fn is_valid_peer_id_string(peer_id: &str) -> bool {
-        peer_id.len() == 16 && hex::decode(peer_id).is_ok()
-    }
-    
-    /// Convert peer ID bytes to string
-    pub fn bytes_to_string(bytes: &[u8; 8]) -> String {
-        hex::encode(bytes).to_uppercase()
-    }
-    
-    /// Convert peer ID string to bytes
-    pub fn string_to_bytes(peer_id: &str) -> Option<[u8; 8]> {
-        if peer_id.len() == 16 {
-            if let Ok(decoded) = hex::decode(peer_id) {
-                if decoded.len() == 8 {
-                    let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&decoded);
-                    return Some(bytes);
-                }
-            }
-        }
-        None
-    }
 }
 
 /// Bluetooth connection constants
