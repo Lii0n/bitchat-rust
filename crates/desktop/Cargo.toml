@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bitchat-core = { path = "../core" }
+bitchat-core = { path = "../core", features = ["bluetooth"] }
 eframe = { workspace = true }
 egui = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-winapi = { workspace = true }
+dirs = { workspace = true }  
+hex = { workspace = true }  
+winapi = { version = "0.3", features = ["winuser", "wingdi"] }

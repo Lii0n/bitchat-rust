@@ -1,7 +1,10 @@
-﻿use bitchat_core::{BitchatCore, Config};
+﻿// Fix for crates/desktop/src/main.rs
+// Replace the entire file with this corrected version:
+
+use bitchat_core::{BitchatCore, Config};
 use eframe::egui;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable logging
     tracing_subscriber::fmt::init();
 
@@ -29,11 +32,12 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let core = rt.block_on(async { BitchatCore::new(config).await }).unwrap();
             
-            Box::new(BitChatApp::new(cc, core, rt))
+            // Return the Box directly, not wrapped in Ok()
+            Box::new(BitChatApp::new(cc, core, rt)) as Box<dyn eframe::App>
         }),
     )?;
 
-    Ok(())
+    Ok(())  // Add explicit Ok() return
 }
 
 struct BitChatApp {
