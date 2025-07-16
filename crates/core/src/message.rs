@@ -1,70 +1,63 @@
-use serde::{Deserialize, Serialize};
+//! Message types and handling for BitChat
+
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Represents a message in the BitChat system
+#[derive(Debug, Clone)]
 pub struct Message {
     pub id: Uuid,
     pub content: String,
-    pub sender: String,
+    pub sender_id: String,
     pub channel: Option<String>,
     pub timestamp: DateTime<Utc>,
-    pub message_type: MessageType,
-    pub encrypted: bool,
+    pub message_type: MessageKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MessageType {
-    Public,
-    Private,
+/// Different kinds of messages
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageKind {
+    Text,
+    Announce,
     System,
     ChannelJoin,
     ChannelLeave,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Channel {
-    pub name: String,
-    pub password_protected: bool,
-    pub owner: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub members: Vec<String>,
-}
-
 impl Message {
-    pub fn new_public(content: String, sender: String) -> Self {
+    /// Create a new text message
+    pub fn new_text(content: String, sender_id: String, channel: Option<String>) -> Self {
         Self {
             id: Uuid::new_v4(),
             content,
-            sender,
+            sender_id,
+            channel,
+            timestamp: Utc::now(),
+            message_type: MessageKind::Text,
+        }
+    }
+    
+    /// Create a new announcement message
+    pub fn new_announce(nickname: String, sender_id: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            content: nickname,
+            sender_id,
             channel: None,
             timestamp: Utc::now(),
-            message_type: MessageType::Public,
-            encrypted: false,
+            message_type: MessageKind::Announce,
         }
     }
-
-    pub fn new_private(content: String, sender: String, recipient: String) -> Self {
+    
+    /// Create a system message
+    pub fn new_system(content: String) -> Self {
         Self {
             id: Uuid::new_v4(),
             content,
-            sender,
-            channel: Some(recipient),
+            sender_id: "system".to_string(),
+            channel: None,
             timestamp: Utc::now(),
-            message_type: MessageType::Private,
-            encrypted: true,
-        }
-    }
-
-    pub fn new_channel(content: String, sender: String, channel: String) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            content,
-            sender,
-            channel: Some(channel),
-            timestamp: Utc::now(),
-            message_type: MessageType::Public,
-            encrypted: false,
+            message_type: MessageKind::System,
         }
     }
 }

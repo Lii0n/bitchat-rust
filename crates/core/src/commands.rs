@@ -1,315 +1,278 @@
-﻿use crate::{BitchatCore, BinaryProtocolManager, MessageType};
+﻿//! Command handling for BitChat operations
+
+use crate::{BitchatCore, BinaryProtocol, MessageType};
 use anyhow::Result;
 use std::sync::Arc;
 
+/// Represents the result of executing a command
 #[derive(Debug, Clone)]
 pub enum CommandResult {
-    Success { message: String },
-    Error { message: String },
+    Success(String),
+    Error(String),
+    Exit,
 }
 
-#[derive(Clone)]
+/// Available BitChat commands
+#[derive(Debug, Clone)]
+pub enum BitchatCommand {
+    // Channel commands
+    JoinChannel(String),
+    LeaveChannel(String),
+    ListChannels,
+    SetChannel(String),
+    SendChannelMessage(String, String), // channel, message
+    
+    // Peer commands
+    ListPeers,
+    SendDirectMessage(String, String), // peer_id, message
+    
+    // System commands
+    Status,
+    Help,
+    Quit,
+    
+    // Protocol commands
+    Announce(String), // nickname
+    Ping(String),     // peer_id
+}
+
+impl BitchatCommand {
+    /// Parse a command string into a BitchatCommand
+    pub fn parse(input: &str) -> Result<Self> {
+        let parts: Vec<&str> = input.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return Err(anyhow::anyhow!("Empty command"));
+        }
+
+        match parts[0] {
+            "/join" | "/j" => {
+                if parts.len() < 2 {
+                    return Err(anyhow::anyhow!("Usage: /join <channel>"));
+                }
+                Ok(BitchatCommand::JoinChannel(parts[1].to_string()))
+            },
+            "/leave" | "/l" => {
+                if parts.len() < 2 {
+                    return Err(anyhow::anyhow!("Usage: /leave <channel>"));
+                }
+                Ok(BitchatCommand::LeaveChannel(parts[1].to_string()))
+            },
+            "/channels" | "/ch" => Ok(BitchatCommand::ListChannels),
+            "/set" => {
+                if parts.len() < 2 {
+                    return Err(anyhow::anyhow!("Usage: /set <channel>"));
+                }
+                Ok(BitchatCommand::SetChannel(parts[1].to_string()))
+            },
+            "/peers" | "/p" => Ok(BitchatCommand::ListPeers),
+            "/msg" | "/m" => {
+                if parts.len() < 3 {
+                    return Err(anyhow::anyhow!("Usage: /msg <peer_id> <message>"));
+                }
+                let peer_id = parts[1].to_string();
+                let message = parts[2..].join(" ");
+                Ok(BitchatCommand::SendDirectMessage(peer_id, message))
+            },
+            "/status" | "/s" => Ok(BitchatCommand::Status),
+            "/help" | "/h" | "/?" => Ok(BitchatCommand::Help),
+            "/quit" | "/exit" | "/q" => Ok(BitchatCommand::Quit),
+            "/announce" | "/a" => {
+                if parts.len() < 2 {
+                    return Err(anyhow::anyhow!("Usage: /announce <nickname>"));
+                }
+                Ok(BitchatCommand::Announce(parts[1].to_string()))
+            },
+            "/ping" => {
+                if parts.len() < 2 {
+                    return Err(anyhow::anyhow!("Usage: /ping <peer_id>"));
+                }
+                Ok(BitchatCommand::Ping(parts[1].to_string()))
+            },
+            _ => {
+                // If it doesn't start with /, treat as channel message
+                if !input.starts_with('/') {
+                    return Err(anyhow::anyhow!("Not in a channel. Use /join <channel> first."));
+                }
+                Err(anyhow::anyhow!("Unknown command: {}", parts[0]))
+            }
+        }
+    }
+
+    /// Get help text for all commands
+    pub fn help_text() -> String {
+        r#"
+BitChat Commands:
+
+Channel Commands:
+  /join <channel>     Join a channel
+  /leave <channel>    Leave a channel  
+  /channels           List all joined channels
+  /set <channel>      Set current active channel
+
+Messaging:
+  <message>           Send message to current channel
+  /msg <peer> <text>  Send direct message to peer
+
+Peer Management:
+  /peers              List connected peers
+  /announce <nick>    Announce yourself with nickname
+  /ping <peer>        Ping a specific peer
+
+System:
+  /status             Show system status
+  /help               Show this help
+  /quit               Exit BitChat
+
+Examples:
+  /join #general
+  /set #general
+  Hello everyone!
+  /msg alice123 Hi Alice!
+        "#.to_string()
+    }
+}
+
+/// Command processor that handles BitChat commands
 pub struct CommandProcessor {
     core: Arc<BitchatCore>,
+    current_channel: Option<String>,
 }
 
 impl CommandProcessor {
     pub fn new(core: Arc<BitchatCore>) -> Self {
-        Self { core }
-    }
-
-    pub async fn process_command(&self, input: &str) -> Result<CommandResult> {
-        let input = input.trim();
-
-        if input.starts_with('/') {
-            self.process_slash_command(input).await
-        } else {
-            // Regular message
-            self.send_public_message(input).await?;
-            Ok(CommandResult::Success {
-                message: format!("Sent: {}", input),
-            })
+        Self {
+            core,
+            current_channel: None,
         }
     }
 
-    async fn process_slash_command(&self, input: &str) -> Result<CommandResult> {
-        let parts: Vec<&str> = input.splitn(2, ' ').collect();
-        let command = parts[0];
-        let args = if parts.len() > 1 { parts[1] } else { "" };
-
-        match command {
-            "/nick" | "/nickname" => {
-                if args.is_empty() {
-                    return Ok(CommandResult::Error {
-                        message: "Usage: /nick <nickname>".to_string(),
-                    });
+    /// Process a command and return the result
+    pub async fn process_command(&mut self, input: &str) -> CommandResult {
+        // Handle non-command messages (send to current channel)
+        if !input.starts_with('/') {
+            if let Some(ref channel) = self.current_channel {
+                match self.core.send_channel_message(channel, input).await {
+                    Ok(_) => CommandResult::Success(format!("[{}] You: {}", channel, input)),
+                    Err(e) => CommandResult::Error(format!("Failed to send message: {}", e)),
                 }
-                self.set_nickname(args).await
-            }
-            "/send" => {
-                if args.is_empty() {
-                    return Ok(CommandResult::Error {
-                        message: "Usage: /send <message>".to_string(),
-                    });
-                }
-                self.send_public_message(args).await?;
-                Ok(CommandResult::Success {
-                    message: format!("Sent: {}", args),
-                })
-            }
-            "/msg" | "/pm" => {
-                let msg_parts: Vec<&str> = args.splitn(2, ' ').collect();
-                if msg_parts.len() < 2 {
-                    return Ok(CommandResult::Error {
-                        message: "Usage: /msg <peer_id> <message>".to_string(),
-                    });
-                }
-                self.send_private_message(msg_parts[0], msg_parts[1]).await
-            }
-            "/join" | "/j" => {
-                if args.is_empty() {
-                    return Ok(CommandResult::Error {
-                        message: "Usage: /join <channel>".to_string(),
-                    });
-                }
-                self.join_channel(args).await
-            }
-            "/leave" | "/part" => {
-                if args.is_empty() {
-                    return Ok(CommandResult::Error {
-                        message: "Usage: /leave <channel>".to_string(),
-                    });
-                }
-                self.leave_channel(args).await
-            }
-            "/peers" | "/who" => {
-                self.list_peers().await
-            }
-            "/help" => {
-                Ok(CommandResult::Success {
-                    message: self.get_help_text(),
-                })
-            }
-            _ => Ok(CommandResult::Error {
-                message: format!("Unknown command: {}. Type /help for available commands.", command),
-            }),
-        }
-    }
-
-    async fn send_public_message(&self, content: &str) -> Result<()> {
-        #[cfg(feature = "bluetooth")]
-        {
-            self.core.send_message(content).await?;
-        }
-        Ok(())
-    }
-
-    async fn send_private_message(&self, recipient: &str, content: &str) -> Result<CommandResult> {
-        // Parse recipient peer ID
-        let recipient_bytes = hex::decode(recipient).map_err(|_| {
-            anyhow::anyhow!("Invalid recipient peer ID format")
-        })?;
-        
-        if recipient_bytes.len() != 8 {
-            return Ok(CommandResult::Error {
-                message: "Recipient peer ID must be 8 bytes (16 hex characters)".to_string(),
-            });
-        }
-
-        let mut recipient_id = [0u8; 8];
-        recipient_id.copy_from_slice(&recipient_bytes);
-
-        let packet = BinaryProtocolManager::create_message_packet(
-            self.core.get_peer_id(),
-            Some(recipient_id),
-            content,
-        )?;
-
-        #[cfg(feature = "bluetooth")]
-        {
-            let data = BinaryProtocolManager::encode(&packet)?;
-            let bluetooth = self.core.bluetooth.lock().await;
-            bluetooth.broadcast_message(&data).await?;
-        }
-
-        Ok(CommandResult::Success {
-            message: format!("Private message sent to {}", recipient),
-        })
-    }
-
-    async fn join_channel(&self, channel: &str) -> Result<CommandResult> {
-        let channel_name = if channel.starts_with('#') {
-            channel.to_string()
-        } else {
-            format!("#{}", channel)
-        };
-
-        // Add to local channel manager
-        {
-            let mut channel_manager = self.core.channel_manager.lock().await;
-            channel_manager.join_channel(&channel_name, hex::encode(self.core.get_peer_id()))?;
-        }
-
-        // Broadcast channel join
-        let packet = crate::protocol::BitchatPacket::new_broadcast(
-            MessageType::ChannelJoin,
-            self.core.get_peer_id(),
-            channel_name.as_bytes().to_vec(),
-        );
-
-        #[cfg(feature = "bluetooth")]
-        {
-            let data = BinaryProtocolManager::encode(&packet)?;
-            let bluetooth = self.core.bluetooth.lock().await;
-            bluetooth.broadcast_message(&data).await?;
-        }
-
-        Ok(CommandResult::Success {
-            message: format!("Joined channel {}", channel_name),
-        })
-    }
-
-    async fn leave_channel(&self, channel: &str) -> Result<CommandResult> {
-        let channel_name = if channel.starts_with('#') {
-            channel.to_string()
-        } else {
-            format!("#{}", channel)
-        };
-
-        // Remove from local channel manager
-        {
-            let mut channel_manager = self.core.channel_manager.lock().await;
-            channel_manager.leave_channel(&channel_name, &hex::encode(self.core.get_peer_id()))?;
-        }
-
-        // Broadcast channel leave
-        let packet = crate::protocol::BitchatPacket::new_broadcast(
-            MessageType::ChannelLeave,
-            self.core.get_peer_id(),
-            channel_name.as_bytes().to_vec(),
-        );
-
-        #[cfg(feature = "bluetooth")]
-        {
-            let data = BinaryProtocolManager::encode(&packet)?;
-            let bluetooth = self.core.bluetooth.lock().await;
-            bluetooth.broadcast_message(&data).await?;
-        }
-
-        Ok(CommandResult::Success {
-            message: format!("Left channel {}", channel_name),
-        })
-    }
-
-    async fn set_nickname(&self, nickname: &str) -> Result<CommandResult> {
-        // Store nickname locally
-        self.core.storage.store_peer_info(&hex::encode(self.core.get_peer_id()), nickname)?;
-
-        // Broadcast announce
-        let packet = BinaryProtocolManager::create_announce_packet(
-            self.core.get_peer_id(),
-            nickname,
-        )?;
-
-        #[cfg(feature = "bluetooth")]
-        {
-            let data = BinaryProtocolManager::encode(&packet)?;
-            let bluetooth = self.core.bluetooth.lock().await;
-            bluetooth.broadcast_message(&data).await?;
-        }
-
-        Ok(CommandResult::Success {
-            message: format!("Nickname set to {}", nickname),
-        })
-    }
-
-    async fn list_peers(&self) -> Result<CommandResult> {
-        #[cfg(feature = "bluetooth")]
-        {
-            let bluetooth = self.core.bluetooth.lock().await;
-            let peers = bluetooth.get_connected_peers().await;
-
-            if peers.is_empty() {
-                Ok(CommandResult::Success {
-                    message: "No connected peers".to_string(),
-                })
             } else {
-                let mut message = format!("Connected peers ({}):\n", peers.len());
-                for peer in peers {
-                    message.push_str(&format!("  {} (RSSI: {}dBm)\n", peer.peer_id, peer.rssi));
-                }
-                Ok(CommandResult::Success { message })
+                CommandResult::Error("Not in a channel. Use /join <channel> first.".to_string())
             }
-        }
-
-        #[cfg(not(feature = "bluetooth"))]
-        {
-            Ok(CommandResult::Error {
-                message: "Bluetooth not available".to_string(),
-            })
-        }
-    }
-
-    fn get_help_text(&self) -> String {
-        r#"BitChat Commands:
-  /nick <nickname>      - Set your nickname
-  /send <message>       - Send a public message
-  /msg <peer_id> <msg>  - Send a private message
-  /join <channel>       - Join a channel
-  /leave <channel>      - Leave a channel
-  /peers                - List connected peers
-  /help                 - Show this help
-
-You can also type messages directly without /send."#.to_string()
-    }
-}
-
-// Make CommandProcessor implement the delegate trait
-#[cfg(feature = "bluetooth")]
-impl crate::BitchatBluetoothDelegate for CommandProcessor {
-    fn on_device_discovered(&self, device_id: &str, device_name: Option<&str>, rssi: i8) {
-        println!("📡 Discovered: {} ({:?}) RSSI: {}dBm", device_id, device_name, rssi);
-    }
-
-    fn on_device_connected(&self, device_id: &str, peer_id: &str) {
-        println!("🔗 Connected: {} (peer: {})", device_id, peer_id);
-    }
-
-    fn on_device_disconnected(&self, device_id: &str, peer_id: &str) {
-        println!("❌ Disconnected: {} (peer: {})", device_id, peer_id);
-    }
-
-    fn on_message_received(&self, from_peer: &str, data: &[u8]) {
-        if let Ok(packet) = BinaryProtocolManager::decode(data) {
-            match packet.message_type {
-                MessageType::Message => {
-                    if let Ok(content) = String::from_utf8(packet.payload) {
-                        println!("💬 {}: {}", from_peer, content);
-                    }
-                }
-                MessageType::Announce => {
-                    if let Ok(nickname) = String::from_utf8(packet.payload) {
-                        println!("👋 {} announced as: {}", from_peer, nickname);
-                    }
-                }
-                MessageType::ChannelJoin => {
-                    if let Ok(channel) = String::from_utf8(packet.payload) {
-                        println!("📥 {} joined channel {}", from_peer, channel);
-                    }
-                }
-                MessageType::ChannelLeave => {
-                    if let Ok(channel) = String::from_utf8(packet.payload) {
-                        println!("📤 {} left channel {}", from_peer, channel);
-                    }
-                }
-                _ => {
-                    println!("📦 Received {:?} from {}", packet.message_type, from_peer);
-                }
+        } else {
+            match BitchatCommand::parse(input) {
+                Ok(command) => self.execute_command(command).await,
+                Err(e) => CommandResult::Error(format!("Invalid command: {}", e)),
             }
         }
     }
 
-    fn on_error(&self, message: &str) {
-        eprintln!("❌ Bluetooth error: {}", message);
+    /// Execute a parsed command
+    async fn execute_command(&mut self, command: BitchatCommand) -> CommandResult {
+        match command {
+            BitchatCommand::JoinChannel(channel) => {
+                match self.core.join_channel(&channel, None).await {
+                    Ok(_) => {
+                        self.current_channel = Some(channel.clone());
+                        CommandResult::Success(format!("Joined channel: {}", channel))
+                    },
+                    Err(e) => CommandResult::Error(format!("Failed to join channel: {}", e)),
+                }
+            },
+            
+            BitchatCommand::LeaveChannel(channel) => {
+                match self.core.leave_channel(&channel).await {
+                    Ok(_) => {
+                        if self.current_channel.as_ref() == Some(&channel) {
+                            self.current_channel = None;
+                        }
+                        CommandResult::Success(format!("Left channel: {}", channel))
+                    },
+                    Err(e) => CommandResult::Error(format!("Failed to leave channel: {}", e)),
+                }
+            },
+            
+            BitchatCommand::ListChannels => {
+                match self.core.list_channels().await {
+                    Ok(channels) => {
+                        if channels.is_empty() {
+                            CommandResult::Success("No joined channels".to_string())
+                        } else {
+                            let channel_list = channels.join(", ");
+                            CommandResult::Success(format!("Joined channels: {}", channel_list))
+                        }
+                    },
+                    Err(e) => CommandResult::Error(format!("Failed to list channels: {}", e)),
+                }
+            },
+            
+            BitchatCommand::SetChannel(channel) => {
+                match self.core.list_channels().await {
+                    Ok(channels) => {
+                        if channels.contains(&channel) {
+                            self.current_channel = Some(channel.clone());
+                            CommandResult::Success(format!("Active channel set to {}", channel))
+                        } else {
+                            CommandResult::Error(format!("Not in channel {}. Use /join first.", channel))
+                        }
+                    },
+                    Err(e) => CommandResult::Error(format!("Failed to check channels: {}", e)),
+                }
+            },
+            
+            BitchatCommand::SendChannelMessage(channel, message) => {
+                match self.core.send_channel_message(&channel, &message).await {
+                    Ok(_) => CommandResult::Success(format!("[{}] You: {}", channel, message)),
+                    Err(e) => CommandResult::Error(format!("Failed to send message: {}", e)),
+                }
+            },
+            
+            BitchatCommand::ListPeers => {
+                let peers = self.core.list_peers();
+                if peers.is_empty() {
+                    CommandResult::Success("No connected peers".to_string())
+                } else {
+                    let peer_list = peers.join(", ");
+                    CommandResult::Success(format!("Connected peers: {}", peer_list))
+                }
+            },
+            
+            BitchatCommand::SendDirectMessage(_peer_id, _message) => {
+                CommandResult::Success("Direct messaging not yet implemented".to_string())
+            },
+            
+            BitchatCommand::Status => {
+                let status = format!(
+                    "BitChat Status:\n  Device: {}\n  Current Channel: {}\n  Peer ID: {}",
+                    self.core.config.device_name,
+                    self.current_channel.as_deref().unwrap_or("None"),
+                    hex::encode(self.core.my_peer_id)
+                );
+                CommandResult::Success(status)
+            },
+            
+            BitchatCommand::Help => {
+                CommandResult::Success(BitchatCommand::help_text())
+            },
+            
+            BitchatCommand::Quit => CommandResult::Exit,
+            
+            BitchatCommand::Announce(_nickname) => {
+                CommandResult::Success("Announce not yet implemented".to_string())
+            },
+            
+            BitchatCommand::Ping(_peer_id) => {
+                CommandResult::Success("Ping not yet implemented".to_string())
+            },
+        }
+    }
+
+    /// Get the current active channel
+    pub fn current_channel(&self) -> Option<&String> {
+        self.current_channel.as_ref()
+    }
+
+    /// Set the current active channel
+    pub fn set_current_channel(&mut self, channel: Option<String>) {
+        self.current_channel = channel;
     }
 }

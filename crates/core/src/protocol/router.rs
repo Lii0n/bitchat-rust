@@ -1,6 +1,6 @@
-﻿//! Packet router for SecureMesh
+﻿//! Packet router for BitChat
 
-use super::packet::Packet;
+use super::binary::BitchatPacket;
 
 /// Packet router for mesh networking
 pub struct PacketRouter;
@@ -10,7 +10,7 @@ impl PacketRouter {
         Self
     }
     
-    pub fn route_packet(&self, _packet: &Packet) -> Vec<String> {
+    pub fn route_packet(&self, _packet: &BitchatPacket) -> Vec<String> {
         // TODO: Implement routing logic
         vec![]
     }

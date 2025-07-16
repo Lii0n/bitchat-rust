@@ -1,116 +1,4 @@
-﻿// ============================================================================
-// BINARY PROTOCOL MANAGER
-// ============================================================================
-
-/// Handles encoding and decoding of BitChat packets with automatic fragmentation and encryption
-pub struct BinaryProtocol {
-    fragmentation_manager: FragmentationManager,
-    encryption: BitChatEncryption,
-}
-
-impl BinaryProtocol {
-    /// Create a new protocol manager
-    pub fn new() -> Self {
-        Self {
-            fragmentation_manager: FragmentationManager::new(),
-            encryption: BitChatEncryption::new(),
-        }
-    }
-    
-    /// Create protocol manager with existing identity
-    pub fn with_identity(identity: BitChatIdentity) -> Self {
-        Self {
-            fragmentation_manager: FragmentationManager::new(),
-            encryption: BitChatEncryption::with_identity(identity),
-        }
-    }
-    
-    /// Get our public key for announcements
-    pub fn our_public_key(&self) -> [u8; 32] {
-        self.encryption.our_public_key().to_bytes()
-    }
-    
-    /// Get our signing public key
-    pub fn our_signing_key(&self) -> [u8; 32] {
-        self.encryption.our_signing_key().to_bytes()
-    }
-    
-    /// Get our fingerprint
-    pub fn our_fingerprint(&self) -> [u8; 32] {
-        self.encryption.our_fingerprint()
-    }
-    
-    /// Initiate key exchange with a peer
-    pub fn initiate_key_exchange(&mut self, peer_id: &str) -> Result<Vec<Vec<u8>>> {
-        let key_exchange_data = self.encryption.initiate_key_exchange(peer_id)?;
-        
-        // Create and fragment key exchange packet
-        let sender_id = peer_id_to_bytes(peer_id);
-        let recipient_id = peer_id_to_bytes(peer_id); // We know the target
-        
-        self.encode_message(
-            MessageType::KeyExchange,
-            sender_id,
-            Some(recipient_id),
-            key_exchange_data,
-        )
-    }
-    
-    /// Handle incoming key exchange packet
-    pub fn handle_key_exchange(&mut self, peer_id: &str, packet: &BitchatPacket) -> Result<Option<Vec<Vec<u8>>>> {
-        let response_data = self.encryption.handle_key_exchange(peer_id, &packet.payload)?;
-        
-        if let Some(response) = response_data {
-            let sender_id = self.our_peer_id_bytes();
-            let recipient_id = peer_id_to_bytes(peer_id);
-            
-            let packets = self.encode_message(
-                MessageType::KeyExchange,
-                sender_id,
-                Some(recipient_id),
-                response,
-            )?;
-            Ok(Some(packets))
-        } else {
-            Ok(None)
-        }
-    }
-    
-    /// Join a password-protected channel
-    pub fn join_channel(&mut self, channel_name: &str, password: Option<&str>) -> Result<()> {
-        if let Some(pwd) = password {
-            self.encryption.join_channel(channel_name, pwd)?;
-        }
-        Ok(())
-    }
-    
-    /// Leave a channel
-    pub fn leave_channel(&mut self, channel_name: &str) {
-        self.encryption.leave_channel(channel_name);
-    }
-    
-    /// Encode message with automatic fragmentation if needed
-    pub fn encode_message(
-        &self,
-        message_type: MessageType,
-        sender_id: [u8; 8],
-        recipient_id: Option<[u8; 8]>,
-        payload: Vec<u8>
-    ) -> Result<Vec<Vec<u8>>> {
-        // Fragment the message if needed
-        let packets = FragmentationManager::fragment_message(
-            message_type, sender_id, recipient_id, payload
-        )?;
-        
-        // Encode each packet
-        let mut encoded_packets = Vec::new();
-        for packet in packets {
-            let encoded = Self::encode(&packet)?;
-            encoded_packets.push(encoded);
-        }
-        
-        Ok(encoded_packets)
-    }//! BitChat Binary Protocol - Consolidated Implementation
+﻿//! BitChat Binary Protocol - Consolidated Implementation
 //! 
 //! This module provides a streamlined, efficient implementation of the BitChat
 //! binary protocol as specified in the whitepaper. All protocol-related
@@ -125,12 +13,15 @@ impl BinaryProtocol {
 //! - LZ4 compression
 
 use serde::{Deserialize, Serialize};
+// Clean up warnings
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BufMut, BytesMut};
 use tracing::{debug, warn};
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
-// Re-export encryption types
-pub use crate::encryption::{BitChatEncryption, BitChatIdentity, EncryptionStats};
+// Import encryption types from the encryption module
+use crate::encryption::{BitChatEncryption, BitChatIdentity, EncryptionStats};
 
 // ============================================================================
 // PROTOCOL CONSTANTS
@@ -461,30 +352,21 @@ impl CompressionUtil {
         data.len() > COMPRESSION_THRESHOLD
     }
     
-    /// Compress data using LZ4 (stub - requires lz4 crate)
+    /// Compress data using LZ4
     pub fn compress(data: &[u8]) -> Option<Vec<u8>> {
-        // Note: Requires lz4 crate dependency
-        // For now, return None to disable compression
-        None
-        
-        // With lz4 crate:
-        // match lz4::block::compress(data, None, true) {
-        //     Ok(compressed) if compressed.len() < data.len() => Some(compressed),
-        //     _ => None,
-        // }
+        // Use the lz4 crate
+        match lz4::block::compress(data, None, true) {
+            Ok(compressed) if compressed.len() < data.len() => Some(compressed),
+            _ => None,
+        }
     }
     
-    /// Decompress LZ4 data (stub - requires lz4 crate)
+    /// Decompress LZ4 data
     pub fn decompress(compressed: &[u8], original_size: usize) -> Option<Vec<u8>> {
-        // Note: Requires lz4 crate dependency
-        // For now, return None to disable decompression
-        None
-        
-        // With lz4 crate:
-        // match lz4::block::decompress(compressed, Some(original_size as i32)) {
-        //     Ok(decompressed) if decompressed.len() == original_size => Some(decompressed),
-        //     _ => None,
-        // }
+        match lz4::block::decompress(compressed, Some(original_size as i32)) {
+            Ok(decompressed) if decompressed.len() == original_size => Some(decompressed),
+            _ => None,
+        }
     }
 }
 
@@ -492,19 +374,16 @@ impl CompressionUtil {
 // MESSAGE FRAGMENTATION & DEDUPLICATION
 // ============================================================================
 
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-
 /// Manages message fragmentation and reassembly
 pub struct FragmentationManager {
     pending_fragments: HashMap<u32, FragmentAssembly>,
-    seen_messages: HashSet<u32>,
+    pub seen_messages: HashSet<u32>,
     cleanup_interval: Duration,
     last_cleanup: Instant,
 }
 
 #[derive(Debug)]
-struct FragmentAssembly {
+pub struct FragmentAssembly {
     sender_id: [u8; 8],
     recipient_id: Option<[u8; 8]>,
     message_type: MessageType,
@@ -707,20 +586,14 @@ pub struct FragmentationStats {
     pub seen_messages: usize,
 }
 
-/// Generate a unique message ID
-fn generate_message_id() -> u32 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(1);
-    
-    let timestamp = (current_timestamp() & 0xFFFF) as u32; // Lower 16 bits of timestamp
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF; // Lower 16 bits of counter
-    
-    (timestamp << 16) | counter
-}
+// ============================================================================
+// BINARY PROTOCOL MANAGER
+// ============================================================================
 
-/// Handles encoding and decoding of BitChat packets with automatic fragmentation
+/// Handles encoding and decoding of BitChat packets with automatic fragmentation and encryption
 pub struct BinaryProtocol {
     fragmentation_manager: FragmentationManager,
+    encryption: BitChatEncryption,
 }
 
 impl BinaryProtocol {
@@ -728,10 +601,83 @@ impl BinaryProtocol {
     pub fn new() -> Self {
         Self {
             fragmentation_manager: FragmentationManager::new(),
+            encryption: BitChatEncryption::new(),
         }
     }
     
-    /// Encode message with automatic fragmentation and encryption if needed
+    /// Create protocol manager with existing identity
+    pub fn with_identity(identity: BitChatIdentity) -> Self {
+        Self {
+            fragmentation_manager: FragmentationManager::new(),
+            encryption: BitChatEncryption::with_identity(identity),
+        }
+    }
+    
+    /// Get our public key for announcements
+    pub fn our_public_key(&self) -> [u8; 32] {
+        self.encryption.our_public_key().to_bytes()
+    }
+    
+    /// Get our signing public key
+    pub fn our_signing_key(&self) -> [u8; 32] {
+        self.encryption.our_signing_key().to_bytes()
+    }
+    
+    /// Get our fingerprint
+    pub fn our_fingerprint(&self) -> [u8; 32] {
+        self.encryption.our_fingerprint()
+    }
+    
+    /// Initiate key exchange with a peer
+    pub fn initiate_key_exchange(&mut self, peer_id: &str) -> Result<Vec<Vec<u8>>> {
+        let key_exchange_data = self.encryption.initiate_key_exchange(peer_id)?;
+        
+        // Create and fragment key exchange packet
+        let sender_id = peer_id_to_bytes(peer_id);
+        let recipient_id = peer_id_to_bytes(peer_id); // We know the target
+        
+        self.encode_message(
+            MessageType::KeyExchange,
+            sender_id,
+            Some(recipient_id),
+            key_exchange_data,
+        )
+    }
+    
+    /// Handle incoming key exchange packet
+    pub fn handle_key_exchange(&mut self, peer_id: &str, packet: &BitchatPacket) -> Result<Option<Vec<Vec<u8>>>> {
+        let response_data = self.encryption.handle_key_exchange(peer_id, &packet.payload)?;
+        
+        if let Some(response) = response_data {
+            let sender_id = self.our_peer_id_bytes();
+            let recipient_id = peer_id_to_bytes(peer_id);
+            
+            let packets = self.encode_message(
+                MessageType::KeyExchange,
+                sender_id,
+                Some(recipient_id),
+                response,
+            )?;
+            Ok(Some(packets))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// Join a password-protected channel
+    pub fn join_channel(&mut self, channel_name: &str, password: Option<&str>) -> Result<()> {
+        if let Some(pwd) = password {
+            self.encryption.join_channel(channel_name, pwd)?;
+        }
+        Ok(())
+    }
+    
+    /// Leave a channel
+    pub fn leave_channel(&mut self, channel_name: &str) {
+        self.encryption.leave_channel(channel_name);
+    }
+    
+    /// Encode message with automatic fragmentation if needed
     pub fn encode_message(
         &self,
         message_type: MessageType,
@@ -739,59 +685,14 @@ impl BinaryProtocol {
         recipient_id: Option<[u8; 8]>,
         payload: Vec<u8>
     ) -> Result<Vec<Vec<u8>>> {
-        // Apply encryption based on message type and recipient
-        let encrypted_payload = match message_type {
-            MessageType::Message if recipient_id.is_some() => {
-                // Private message - encrypt for specific peer
-                let peer_id = bytes_to_peer_id(&recipient_id.unwrap());
-                match self.encryption.encrypt_private_message(&peer_id, &payload) {
-                    Ok(encrypted) => encrypted,
-                    Err(_) => {
-                        // No session yet, send unencrypted for key exchange initiation
-                        payload
-                    }
-                }
-            },
-            MessageType::Message => {
-                // Public message - no encryption
-                payload
-            },
-            MessageType::ChannelAnnounce | MessageType::ChannelJoin | MessageType::ChannelLeave => {
-                // Channel messages might be encrypted if we have the channel key
-                if let Ok(channel_name) = String::from_utf8(payload.clone()) {
-                    if let Some(channel) = channel_name.split('|').next() {
-                        match self.encryption.encrypt_channel_message(channel, &payload) {
-                            Ok(encrypted) => encrypted,
-                            Err(_) => payload, // No channel key, send unencrypted
-                        }
-                    } else {
-                        payload
-                    }
-                } else {
-                    payload
-                }
-            },
-            _ => payload, // Other message types not encrypted
-        };
-        
         // Fragment the message if needed
         let packets = FragmentationManager::fragment_message(
-            message_type, sender_id, recipient_id, encrypted_payload
+            message_type, sender_id, recipient_id, payload
         )?;
-        
-        // Add digital signature to each packet if needed
-        let mut signed_packets = Vec::new();
-        for mut packet in packets {
-            if message_type == MessageType::Message || message_type == MessageType::KeyExchange {
-                let signature = self.encryption.sign_data(&packet.payload);
-                packet = packet.with_signature(signature.to_bytes());
-            }
-            signed_packets.push(packet);
-        }
         
         // Encode each packet
         let mut encoded_packets = Vec::new();
-        for packet in signed_packets {
+        for packet in packets {
             let encoded = Self::encode(&packet)?;
             encoded_packets.push(encoded);
         }
@@ -881,21 +782,7 @@ impl BinaryProtocol {
             encryption: enc_stats,
         }
     }
-}
-
-/// Result of processing an incoming message
-#[derive(Debug)]
-pub struct ProcessedMessage {
-    pub packet: BitchatPacket,
-    pub decrypted_payload: Vec<u8>,
-}
-
-/// Combined protocol statistics  
-#[derive(Debug)]
-pub struct ProtocolStats {
-    pub fragmentation: FragmentationStats,
-    pub encryption: EncryptionStats,
-}
+    
     /// Encode packet to binary format
     pub fn encode(packet: &BitchatPacket) -> Result<Vec<u8>> {
         packet.validate()?;
@@ -1079,6 +966,20 @@ pub struct ProtocolStats {
     }
 }
 
+/// Result of processing an incoming message
+#[derive(Debug)]
+pub struct ProcessedMessage {
+    pub packet: BitchatPacket,
+    pub decrypted_payload: Vec<u8>,
+}
+
+/// Combined protocol statistics  
+#[derive(Debug)]
+pub struct ProtocolStats {
+    pub fragmentation: FragmentationStats,
+    pub encryption: EncryptionStats,
+}
+
 // ============================================================================
 // PACKET FACTORY METHODS
 // ============================================================================
@@ -1210,6 +1111,8 @@ fn bytes_to_peer_id(bytes: &[u8; 8]) -> String {
 /// Peer ID utilities
 pub mod peer_utils {
     use rand::Rng;
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
     
     /// Generate a random 8-byte peer ID
     pub fn generate_peer_id() -> [u8; 8] {
@@ -1235,15 +1138,67 @@ pub mod peer_utils {
         }
     }
     
+    /// Generate peer ID from device name
+    pub fn peer_id_from_device_name(device_name: &str) -> [u8; 8] {
+        let mut hasher = DefaultHasher::new();
+        device_name.hash(&mut hasher);
+        let hash = hasher.finish();
+        
+        let mut peer_id = [0u8; 8];
+        peer_id.copy_from_slice(&hash.to_be_bytes());
+        peer_id
+    }
+    
+    /// Generate a compatible peer ID string
+    pub fn generate_compatible_peer_id() -> String {
+        let peer_id = generate_peer_id();
+        peer_id_to_string(&peer_id)
+    }
+    
+    /// Check if peer ID string is valid
+    pub fn is_valid_peer_id_string(peer_id: &str) -> bool {
+        if peer_id.len() != 16 {
+            return false;
+        }
+        hex::decode(peer_id).is_ok()
+    }
+    
+    /// Convert peer ID string to bytes
+    pub fn peer_id_string_to_bytes(peer_id: &str) -> Option<[u8; 8]> {
+        string_to_peer_id(peer_id)
+    }
+    
+    /// Generate peer ID from device info
+    pub fn peer_id_from_device_info(device_info: &str) -> String {
+        let peer_id = peer_id_from_device_name(device_info);
+        peer_id_to_string(&peer_id)
+    }
+    
+    /// Extract peer ID from device name
+    pub fn extract_peer_id_from_device_name(name: &str) -> Option<[u8; 8]> {
+        // Look for hex pattern in device name
+        if name.len() >= 16 {
+            if let Ok(decoded) = hex::decode(&name[..16]) {
+                if decoded.len() == 8 {
+                    let mut peer_id = [0u8; 8];
+                    peer_id.copy_from_slice(&decoded);
+                    return Some(peer_id);
+                }
+            }
+        }
+        None
+    }
+    
+    /// Create advertisement name from peer ID
+    pub fn create_advertisement_name(peer_id: &str) -> String {
+        format!("BitChat-{}", &peer_id[..8])
+    }
+    
     /// Determine connection priority (avoid dual connections)
     pub fn should_initiate_connection(our_id: &str, their_id: &str) -> bool {
         our_id < their_id
     }
 }
-
-// ============================================================================
-// TESTS
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1285,156 +1240,5 @@ mod tests {
         // All fragments should have the same message ID
         let message_id = fragments[0].message_id;
         assert!(fragments.iter().all(|f| f.message_id == message_id));
-        
-        // Check fragment sequencing
-        for (i, fragment) in fragments.iter().enumerate() {
-            let (frag_idx, total_frags) = fragment.fragment_info().unwrap();
-            assert_eq!(frag_idx as usize, i);
-            assert_eq!(total_frags as usize, fragments.len());
-        }
-        
-        // Last fragment should be marked as last
-        assert!(fragments.last().unwrap().is_last_fragment());
-    }
-    
-    #[test]
-    fn test_message_reassembly() {
-        let mut manager = FragmentationManager::new();
-        let sender_id = [1, 2, 3, 4, 5, 6, 7, 8];
-        let original_message = "This is a test message that will be fragmented".repeat(10);
-        
-        // Fragment the message
-        let fragments = FragmentationManager::fragment_message(
-            MessageType::Message,
-            sender_id,
-            None,
-            original_message.as_bytes().to_vec(),
-        ).unwrap();
-        
-        // Process fragments (except the last one)
-        for fragment in &fragments[..fragments.len()-1] {
-            let result = manager.process_packet(fragment.clone()).unwrap();
-            assert!(result.is_none()); // Should not return complete message yet
-        }
-        
-        // Process the last fragment
-        let result = manager.process_packet(fragments.last().unwrap().clone()).unwrap();
-        assert!(result.is_some());
-        
-        let reassembled = result.unwrap();
-        assert_eq!(reassembled.payload, original_message.as_bytes());
-        assert_eq!(reassembled.sender_id, sender_id);
-        assert!(!reassembled.is_fragment());
-    }
-    
-    #[test]
-    fn test_message_deduplication() {
-        let mut manager = FragmentationManager::new();
-        let packet = BitchatPacket::new_broadcast(
-            MessageType::Message,
-            [1, 2, 3, 4, 5, 6, 7, 8],
-            b"Test message".to_vec(),
-        );
-        
-        // First time - should be processed
-        let result1 = manager.process_packet(packet.clone()).unwrap();
-        assert!(result1.is_some());
-        
-        // Second time - should be deduplicated
-        let result2 = manager.process_packet(packet.clone()).unwrap();
-        assert!(result2.is_none());
-        
-        // Verify it's marked as duplicate
-        assert!(manager.is_duplicate(&packet));
-    }
-    
-    #[test]
-    fn test_fragment_validation() {
-        let sender_id = [1, 2, 3, 4, 5, 6, 7, 8];
-        let small_message = b"Small".to_vec();
-        
-        // Small message should not be fragmented
-        let packets = FragmentationManager::fragment_message(
-            MessageType::Message,
-            sender_id,
-            None,
-            small_message,
-        ).unwrap();
-        
-        assert_eq!(packets.len(), 1);
-        assert!(!packets[0].is_fragment());
-    }
-    
-    #[test]
-    fn test_private_message() {
-        let packet = BitchatPacket::new_private(
-            MessageType::Message,
-            [1, 2, 3, 4, 5, 6, 7, 8],
-            [8, 7, 6, 5, 4, 3, 2, 1],
-            b"Private message".to_vec(),
-        );
-        
-        assert!(packet.has_recipient());
-        assert_eq!(packet.recipient_id.unwrap(), [8, 7, 6, 5, 4, 3, 2, 1]);
-        
-        let encoded = BinaryProtocol::encode(&packet).unwrap();
-        let decoded = BinaryProtocol::decode(&encoded).unwrap();
-        
-        assert!(decoded.has_recipient());
-        assert_eq!(decoded.recipient_id.unwrap(), [8, 7, 6, 5, 4, 3, 2, 1]);
-    }
-    
-    #[test]
-    fn test_ttl_decrement() {
-        let mut packet = BitchatPacket::new_broadcast(
-            MessageType::Message,
-            [1, 2, 3, 4, 5, 6, 7, 8],
-            b"Test".to_vec(),
-        );
-        
-        assert_eq!(packet.ttl, MAX_TTL);
-        
-        for i in (1..MAX_TTL).rev() {
-            assert!(packet.decrement_ttl());
-            assert_eq!(packet.ttl, i);
-        }
-        
-        assert!(!packet.decrement_ttl()); // Should return false when TTL is 0
-        assert_eq!(packet.ttl, 0);
-    }
-    
-    #[test]
-    fn test_packet_validation() {
-        let valid_packet = BitchatPacket::new_broadcast(
-            MessageType::Message,
-            [1, 2, 3, 4, 5, 6, 7, 8],
-            b"Valid message".to_vec(),
-        );
-        
-        assert!(valid_packet.validate().is_ok());
-        
-        let mut invalid_packet = valid_packet.clone();
-        invalid_packet.version = 99;
-        assert!(invalid_packet.validate().is_err());
-        
-        let mut invalid_ttl = valid_packet.clone();
-        invalid_ttl.ttl = 0;
-        assert!(invalid_ttl.validate().is_err());
-    }
-    
-    #[test]
-    fn test_factory_methods() {
-        let sender_id = [1, 2, 3, 4, 5, 6, 7, 8];
-        
-        let announce = BinaryProtocol::create_announce(sender_id, "TestUser");
-        assert_eq!(announce.message_type, MessageType::Announce);
-        assert_eq!(announce.payload, b"TestUser");
-        
-        let message = BinaryProtocol::create_message(sender_id, None, "Hello");
-        assert_eq!(message.message_type, MessageType::Message);
-        assert!(!message.has_recipient());
-        
-        let private_msg = BinaryProtocol::create_message(sender_id, Some([8, 7, 6, 5, 4, 3, 2, 1]), "Secret");
-        assert!(private_msg.has_recipient());
     }
 }

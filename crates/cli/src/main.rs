@@ -1,4 +1,4 @@
-﻿use bitchat_core::{BitchatCore, Config, BitchatBluetoothDelegate};
+﻿use bitchat_core::{BitchatCore, Config, BitchatBluetoothDelegate, BinaryProtocol, MessageType};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,14 +50,14 @@ impl BitchatBluetoothDelegate for CliDelegate {
     }
 
     fn on_message_received(&self, from_peer: &str, data: &[u8]) {
-        if let Ok(packet) = bitchat_core::BinaryProtocolManager::decode(data) {
+        if let Ok(packet) = BinaryProtocol::decode(data) {
             match packet.message_type {
-                bitchat_core::MessageType::Message => {
+                MessageType::Message => {
                     if let Ok(content) = String::from_utf8(packet.payload) {
                         println!("💬 {}: {}", from_peer, content);
                     }
                 }
-                bitchat_core::MessageType::Announce => {
+                MessageType::Announce => {
                     if let Ok(nickname) = String::from_utf8(packet.payload) {
                         println!("👋 {} announced as: {}", from_peer, nickname);
                     }
@@ -127,7 +127,7 @@ async fn start_interactive_mode(core: BitchatCore) -> anyhow::Result<()> {
         let delegate = Arc::new(CliDelegate);
         
         if let Err(e) = core.start_bluetooth_with_delegate(delegate).await {
-            error!("Failed to start Bluetooth: {}", e);
+            eprintln!("Failed to start Bluetooth: {}", e);
             println!("❌ Bluetooth not available: {}", e);
             println!("💡 Make sure Bluetooth is enabled and you have permissions");
         } else {
@@ -153,6 +153,7 @@ async fn start_interactive_mode(core: BitchatCore) -> anyhow::Result<()> {
     
     loop {
         print!("bitchat> ");
+        io::Write::flush(&mut io::stdout())?;
         line.clear();
         
         match reader.read_line(&mut line).await {
@@ -174,8 +175,9 @@ async fn start_interactive_mode(core: BitchatCore) -> anyhow::Result<()> {
                     }
                 } else if input.starts_with('/') {
                     println!("❓ Unknown command: {}", input);
+                    println!("💡 Try /send <message>, /peers, or /quit");
                 } else {
-                    // Treat as message
+                    // Treat as regular message
                     if let Err(e) = send_message_inline(&core, input).await {
                         eprintln!("❌ Failed to send message: {}", e);
                     }
@@ -188,73 +190,43 @@ async fn start_interactive_mode(core: BitchatCore) -> anyhow::Result<()> {
         }
     }
     
-    println!("👋 Shutting down...");
-    
-    #[cfg(feature = "bluetooth")]
-    {
-        if let Err(e) = core.stop_bluetooth().await {
-            error!("Error stopping Bluetooth: {}", e);
-        }
-    }
-    
+    println!("👋 Goodbye!");
     Ok(())
 }
 
 async fn send_message(core: BitchatCore, message: &str) -> anyhow::Result<()> {
     println!("📤 Sending message: {}", message);
-    
-    #[cfg(feature = "bluetooth")]
-    {
-        core.send_message(message).await?;
-        println!("✅ Message sent");
-    }
-    
-    #[cfg(not(feature = "bluetooth"))]
-    {
-        println!("⚠️  Bluetooth not available - message not sent");
-    }
-    
+    core.send_channel_message("#general", message).await?;
     Ok(())
 }
 
 async fn send_message_inline(core: &BitchatCore, message: &str) -> anyhow::Result<()> {
-    #[cfg(feature = "bluetooth")]
-    {
-        core.send_message(message).await?;
-        println!("📤 Sent: {}", message);
-    }
-    
-    #[cfg(not(feature = "bluetooth"))]
-    {
-        println!("⚠️  Bluetooth not available");
-    }
-    
+    core.send_channel_message("#general", message).await?;
+    println!("✅ Message sent: {}", message);
     Ok(())
 }
 
 async fn show_peers(core: BitchatCore) -> anyhow::Result<()> {
-    show_peers_inline(&core).await;
+    let peers = core.list_peers();
+    if peers.is_empty() {
+        println!("👥 No connected peers");
+    } else {
+        println!("👥 Connected peers ({}):", peers.len());
+        for peer in peers {
+            println!("  • {}", peer);
+        }
+    }
     Ok(())
 }
 
 async fn show_peers_inline(core: &BitchatCore) {
-    #[cfg(feature = "bluetooth")]
-    {
-        let bluetooth = core.bluetooth.lock().await;
-        let peers = bluetooth.get_connected_peers().await;
-        
-        if peers.is_empty() {
-            println!("👥 No connected peers");
-        } else {
-            println!("👥 Connected peers ({}):", peers.len());
-            for peer in peers {
-                println!("  🔗 {} (RSSI: {}dBm)", peer.peer_id, peer.rssi);
-            }
+    let peers = core.list_peers();
+    if peers.is_empty() {
+        println!("👥 No connected peers");
+    } else {
+        println!("👥 Connected peers ({}):", peers.len());
+        for peer in peers {
+            println!("  • {}", peer);
         }
-    }
-    
-    #[cfg(not(feature = "bluetooth"))]
-    {
-        println!("⚠️  Bluetooth not available");
     }
 }
