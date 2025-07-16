@@ -11,6 +11,7 @@ pub mod constants;
 #[cfg(windows)]
 pub mod windows;
 
+
 // Re-export main types
 pub use config::BluetoothConfig;
 pub use events::{BluetoothEvent, BluetoothEventListener, LoggingEventListener};
