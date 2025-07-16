@@ -7,18 +7,23 @@ use tracing::info;
 use std::io::Write;
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    /// Device name (will be used as peer ID)
-    #[arg(short, long, default_value = "RustBitChat")]
-    device_name: String,
-    
-    /// Data directory
-    #[arg(short, long)]
-    data_dir: Option<PathBuf>,
-    
+#[command(name = "bitchat-cli")]
+#[command(about = "BitChat command line interface")]
+struct Cli {  // Changed from Args to Cli
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Data directory for BitChat
+    #[arg(short = 'd', long, help = "Data directory path")]
+    data_dir: Option<PathBuf>,
+
+    /// Device name (peer ID)
+    #[arg(short = 'n', long, help = "Device name/peer ID")]
+    device_name: Option<String>,
+
+    /// Enable verbose logging
+    #[arg(short = 'v', long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -87,13 +92,31 @@ async fn main() -> anyhow::Result<()> {
         dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("bitchat")
     });
     
+    // Handle the Option<String> for device_name
+    let device_name = cli.device_name.unwrap_or_else(|| {
+        // Generate a default device name if none provided
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "bitchat-cli".to_string())
+            .hash(&mut hasher);
+        let hash = hasher.finish();
+        
+        let mut peer_bytes = [0u8; 8];
+        peer_bytes.copy_from_slice(&hash.to_be_bytes());
+        hex::encode(peer_bytes).to_uppercase()
+    });
+    
     let config = Config {
-        device_name: cli.device_name.clone(),
+        device_name: device_name.clone(),  // Now it's a String, not Option<String>
         data_dir,
         ..Default::default()
     };
     
-    info!("Starting BitChat with device name: {}", cli.device_name);
+    info!("Starting BitChat with device name: {}", device_name);
     
     // Create BitChat core
     let core = BitchatCore::new(config).await?;

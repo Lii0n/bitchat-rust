@@ -11,4 +11,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
-hex = { workspace = true } 
+hex = { workspace = true }
+
+[features]
+default = ["bluetooth"]
+bluetooth = []
