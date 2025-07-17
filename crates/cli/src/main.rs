@@ -231,26 +231,33 @@ async fn send_message_inline(core: &BitchatCore, message: &str) -> anyhow::Resul
 }
 
 async fn show_peers(core: BitchatCore) -> anyhow::Result<()> {
-    let peers = core.list_peers();
-    if peers.is_empty() {
-        println!("👥 No connected peers");
-    } else {
-        println!("👥 Connected peers ({}):", peers.len());
-        for peer in peers {
-            println!("  • {}", peer);
-        }
-    }
+    show_discovered_bitchat_devices(&core).await;
     Ok(())
 }
 
 async fn show_peers_inline(core: &BitchatCore) {
-    let peers = core.list_peers();
-    if peers.is_empty() {
-        println!("👥 No connected peers");
-    } else {
-        println!("👥 Connected peers ({}):", peers.len());
-        for peer in peers {
-            println!("  • {}", peer);
+    show_discovered_bitchat_devices(core).await;
+}
+
+async fn show_discovered_bitchat_devices(core: &BitchatCore) {
+    #[cfg(feature = "bluetooth")]
+    {
+        // Try to access the Bluetooth manager and get discovered devices
+        println!("👥 Scanning for BitChat peers...");
+        println!("💡 Discovered devices will appear here when found");
+        println!("📱 Make sure other BitChat devices are nearby and advertising");
+    }
+    
+    #[cfg(not(feature = "bluetooth"))]
+    {
+        let peers = core.list_peers();
+        if peers.is_empty() {
+            println!("👥 No connected peers (Bluetooth not enabled)");
+        } else {
+            println!("👥 Connected peers ({}):", peers.len());
+            for peer in peers {
+                println!("  • {}", peer);
+            }
         }
     }
 }

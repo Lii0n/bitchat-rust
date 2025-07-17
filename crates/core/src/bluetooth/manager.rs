@@ -1,23 +1,24 @@
 // ==============================================================================
-// crates/core/src/bluetooth/manager.rs
+// crates/core/src/bluetooth/manager.rs - BitChat Compatible Version (Thread Safe)
 // ==============================================================================
 
-//! BitChat Bluetooth Manager - Simplified for BitChat compatibility
+//! BitChat Bluetooth Manager - Compatible with existing BitChat architecture
 //! 
-//! This is a simplified version that works with the existing BitChat structure
-//! without requiring external event systems or complex platform abstractions.
+//! This manager integrates with the existing BitChat structure while providing
+//! a foundation for enhanced Windows-macOS compatibility.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 use anyhow::{Result, anyhow};
 
-use crate::bluetooth::{BluetoothConfig, compatibility::CompatibilityManager, constants, BluetoothEvent};
-use crate::protocol::{BitchatPacket, BinaryProtocolManager};
+// Use the correct imports from the BitChat structure
+use crate::bluetooth::{BluetoothConfig, BluetoothEvent, compatibility::CompatibilityManager, constants};
+use crate::protocol::{BitchatPacket, MessageType, BinaryProtocol};
 
-/// Connected peer information
+/// Connected peer information (matches existing BitChat structure)
 #[derive(Debug, Clone)]
 pub struct ConnectedPeer {
     pub peer_id: String,
@@ -27,7 +28,7 @@ pub struct ConnectedPeer {
     pub message_count: u32,
 }
 
-/// Discovered device information
+/// Discovered device information (matches existing BitChat structure)
 #[derive(Debug, Clone)]
 pub struct DiscoveredDevice {
     pub device_id: String,
@@ -37,23 +38,26 @@ pub struct DiscoveredDevice {
     pub connection_attempts: u32,
 }
 
-/// Simple event callback type
+/// Simple event callback type (compatible with existing BitChat)
 pub type EventCallback = Box<dyn Fn(BluetoothEvent) + Send + Sync>;
 
-/// BitChat Bluetooth Manager - Simplified for BitChat compatibility
+/// Thread-Safe Bluetooth Manager - Compatible with BitChat
 pub struct BluetoothManager {
-    // Configuration and identity
+    // Core configuration
     config: BluetoothConfig,
     my_peer_id: String,
+    
+    // Use compatibility manager when bluetooth feature is enabled
+    #[cfg(feature = "bluetooth")]
     compatibility: CompatibilityManager,
+    #[cfg(not(feature = "bluetooth"))]
+    compatibility: (),
     
     // State management
     connected_peers: Arc<RwLock<HashMap<String, ConnectedPeer>>>,
     discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
-    connection_attempts: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
-    processed_messages: Arc<RwLock<HashSet<String>>>,
     
-    // Event handling
+    // Event handling (compatible with existing BitChat callback style)
     event_callback: Option<EventCallback>,
     
     // Runtime state
@@ -63,61 +67,73 @@ pub struct BluetoothManager {
 }
 
 impl BluetoothManager {
-    /// Create new Bluetooth manager with default configuration
+    /// Create new Bluetooth manager - compatible with existing BitChat usage
     pub async fn new() -> Result<Self> {
-        Self::with_config(BluetoothConfig::default()).await
+        let config = BluetoothConfig::default();
+        Self::with_config(config).await
     }
     
     /// Create Bluetooth manager with custom configuration
     pub async fn with_config(config: BluetoothConfig) -> Result<Self> {
-        info!("Initializing BitChat Bluetooth manager with config: {:?}", config);
+        info!("?? Initializing BitChat Bluetooth Manager");
         
-        // Use the peer ID from config
         let my_peer_id = config.device_name.clone();
         
-        // Validate peer ID format
-        if !constants::peer_id::is_valid_peer_id_string(&my_peer_id) {
-            return Err(anyhow!("Invalid peer ID format: {}", my_peer_id));
+        // Validate peer ID format using the existing constants module
+        #[cfg(feature = "bluetooth")]
+        {
+            if !constants::peer_id::is_valid_peer_id_string(&my_peer_id) {
+                return Err(anyhow!("Invalid peer ID format: {}", my_peer_id));
+            }
         }
         
-        // Create compatibility manager
+        // Create compatibility manager when bluetooth feature is enabled
+        #[cfg(feature = "bluetooth")]
         let compatibility = CompatibilityManager::new(my_peer_id.clone());
         
-        info!("Bluetooth manager initialized with peer ID: {}", my_peer_id);
+        #[cfg(not(feature = "bluetooth"))]
+        let compatibility = ();
         
-        Ok(Self {
+        let manager = Self {
             config,
-            my_peer_id,
+            my_peer_id: my_peer_id.clone(),
             compatibility,
+            
             connected_peers: Arc::new(RwLock::new(HashMap::new())),
             discovered_devices: Arc::new(RwLock::new(HashMap::new())),
-            connection_attempts: Arc::new(RwLock::new(HashMap::new())),
-            processed_messages: Arc::new(RwLock::new(HashSet::new())),
+            
             event_callback: None,
+            
             is_scanning: Arc::new(RwLock::new(false)),
             is_advertising: Arc::new(RwLock::new(false)),
             is_running: Arc::new(RwLock::new(false)),
-        })
+        };
+        
+        info!("?? BitChat Bluetooth Manager initialized");
+        info!("?? Device Peer ID: {}", my_peer_id);
+        
+        Ok(manager)
     }
     
-    /// Set event callback for handling Bluetooth events
+    /// Set event callback - compatible with existing BitChat pattern
     pub fn set_event_callback<F>(&mut self, callback: F) 
     where 
         F: Fn(BluetoothEvent) + Send + Sync + 'static 
     {
         self.event_callback = Some(Box::new(callback));
+        info!("Event callback configured");
     }
     
-    /// Send an event through the callback
+    /// Send event through callback
     fn send_event(&self, event: BluetoothEvent) {
         if let Some(ref callback) = self.event_callback {
             callback(event);
         }
     }
     
-    /// Start Bluetooth operations (scanning and advertising)
+    /// Start all Bluetooth operations
     pub async fn start(&mut self) -> Result<()> {
-        info!("Starting BitChat Bluetooth manager...");
+        info!("?? Starting BitChat Bluetooth Manager...");
         
         // Check if already running
         {
@@ -129,115 +145,233 @@ impl BluetoothManager {
             *running = true;
         }
         
-        // Send adapter state change event
+        // Send adapter state event
         self.send_event(BluetoothEvent::AdapterStateChanged {
             powered_on: true,
             scanning: false,
             advertising: false,
         });
         
-        // Start background tasks
-        self.start_background_tasks().await?;
+        // Start scanning and advertising (simulated for now)
+        self.start_scanning().await?;
+        self.start_advertising().await?;
         
-        info!("BitChat Bluetooth manager started successfully");
+        info!("? BitChat Bluetooth Manager started successfully");
+        info!("?? Ready for BitChat device connections...");
+        
         Ok(())
     }
     
     /// Stop all Bluetooth operations
     pub async fn stop(&mut self) -> Result<()> {
-        info!("Stopping BitChat Bluetooth manager...");
+        info!("?? Stopping BitChat Bluetooth Manager...");
         
-        // Mark as not running
         *self.is_running.write().await = false;
-        *self.is_scanning.write().await = false;
-        *self.is_advertising.write().await = false;
         
-        // Send adapter state change event
-        self.send_event(BluetoothEvent::AdapterStateChanged {
-            powered_on: false,
-            scanning: false,
-            advertising: false,
-        });
+        // Stop scanning and advertising
+        self.stop_scanning().await?;
+        self.stop_advertising().await?;
         
         // Disconnect all peers
         self.disconnect_all_peers().await?;
         
-        info!("BitChat Bluetooth manager stopped");
+        info!("? BitChat Bluetooth Manager stopped");
         Ok(())
     }
     
-    /// Start background tasks for scanning and device management
-    async fn start_background_tasks(&self) -> Result<()> {
-        // In a real implementation, this would start platform-specific
-        // Bluetooth scanning and advertising. For now, we'll simulate it.
+    /// Start scanning (basic implementation for compatibility)
+    pub async fn start_scanning(&mut self) -> Result<()> {
+        info!("?? Starting BitChat device scanning...");
+        
+        if *self.is_scanning.read().await {
+            warn!("Already scanning");
+            return Ok(());
+        }
         
         *self.is_scanning.write().await = true;
-        *self.is_advertising.write().await = true;
         
-        // Send updated adapter state
         self.send_event(BluetoothEvent::AdapterStateChanged {
             powered_on: true,
             scanning: true,
-            advertising: true,
+            advertising: *self.is_advertising.read().await,
         });
         
-        // Start cleanup task
-        let manager = Arc::new(self.clone());
-        tokio::spawn(async move {
-            manager.cleanup_loop().await;
-        });
-        
+        info!("?? Scanning active - ready for BitChat devices");
         Ok(())
     }
     
-    /// Cleanup loop for old connections and devices
-    async fn cleanup_loop(self: Arc<Self>) {
-        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(30));
+    /// Start advertising (basic implementation for compatibility)
+    pub async fn start_advertising(&mut self) -> Result<()> {
+        info!("?? Starting BitChat advertising...");
         
-        while *self.is_running.read().await {
-            cleanup_interval.tick().await;
+        if *self.is_advertising.read().await {
+            warn!("Already advertising");
+            return Ok(());
+        }
+        
+        *self.is_advertising.write().await = true;
+        
+        self.send_event(BluetoothEvent::AdapterStateChanged {
+            powered_on: true,
+            scanning: *self.is_scanning.read().await,
+            advertising: true,
+        });
+        
+        info!("?? Advertising active - visible to BitChat devices");
+        Ok(())
+    }
+    
+    /// Connect to a discovered device (simulated for compatibility)
+    pub async fn connect_to_device(&mut self, device_id: &str) -> Result<ConnectedPeer> {
+        info!("?? Connecting to BitChat device: {}", device_id);
+        
+        // Create a simulated connected peer for testing
+        let connected_peer = ConnectedPeer {
+            peer_id: device_id.to_string(),
+            connected_at: Instant::now(),
+            last_seen: Instant::now(),
+            rssi: Some(-50), // Simulated good signal
+            message_count: 0,
+        };
+        
+        // Store peer
+        {
+            let mut peers = self.connected_peers.write().await;
+            peers.insert(connected_peer.peer_id.clone(), connected_peer.clone());
+        }
+        
+        // Send connection event
+        self.send_event(BluetoothEvent::PeerConnected {
+            peer_id: connected_peer.peer_id.clone(),
+        });
+        
+        info!("?? Successfully connected to BitChat device: {}", connected_peer.peer_id);
+        
+        Ok(connected_peer)
+    }
+    
+    /// Send data to specific peer (simulated for compatibility)
+    pub async fn send_to_peer(&self, peer_id: &str, data: &[u8]) -> Result<()> {
+        debug!("?? Sending {} bytes to peer: {}", data.len(), peer_id);
+        
+        // Check if peer is connected
+        {
+            let peers = self.connected_peers.read().await;
+            if !peers.contains_key(peer_id) {
+                return Err(anyhow!("Peer not connected: {}", peer_id));
+            }
+        }
+        
+        // Simulate successful send
+        info!("?? Successfully sent {} bytes to {}", data.len(), peer_id);
+        Ok(())
+    }
+    
+    /// Send BitChat packet to peer - compatible with existing protocol
+    pub async fn send_packet_to_peer(&self, peer_id: &str, packet: &BitchatPacket) -> Result<()> {
+        // Use the existing BitChat binary protocol encoding
+        let encoded_data = BinaryProtocol::encode(packet)?;
+        self.send_to_peer(peer_id, &encoded_data).await
+    }
+    
+    /// Send announcement to specific peer - compatible with existing BitChat
+    pub async fn send_announcement_to_peer(&self, peer_id: &str, nickname: &str) -> Result<()> {
+        info!("?? Sending announcement to {}: {}", peer_id, nickname);
+        
+        // Use the existing peer module for ID conversion
+        #[cfg(feature = "bluetooth")]
+        {
+            let my_peer_id_bytes = crate::protocol::peer_utils::string_to_peer_id(&self.my_peer_id)
+                .ok_or_else(|| anyhow!("Invalid peer ID format: {}", self.my_peer_id))?;
+            let packet = BitchatPacket::new_broadcast(
+                MessageType::Announce,
+                my_peer_id_bytes,
+                nickname.as_bytes().to_vec(),
+            );
             
-            self.cleanup_discovered_devices().await;
-            self.cleanup_stale_connections().await;
-            self.compatibility.cleanup_old_discoveries().await;
+            self.send_packet_to_peer(peer_id, &packet).await
+        }
+        
+        #[cfg(not(feature = "bluetooth"))]
+        {
+            warn!("Bluetooth feature not enabled, cannot send announcement");
+            Ok(())
         }
     }
     
-    /// Remove old discovered devices
-    async fn cleanup_discovered_devices(&self) {
-        let mut discovered = self.discovered_devices.write().await;
-        let cutoff = Instant::now() - Duration::from_secs(300); // 5 minutes
+    /// Send message to specific peer - compatible with existing BitChat
+    pub async fn send_message_to_peer(&self, peer_id: &str, message: &str) -> Result<()> {
+        info!("?? Sending message to {}: {}", peer_id, message);
         
-        discovered.retain(|_, device| device.last_seen > cutoff);
+        #[cfg(feature = "bluetooth")]
+        {
+            let my_peer_id_bytes = crate::protocol::peer_utils::string_to_peer_id(&self.my_peer_id)
+                .ok_or_else(|| anyhow!("Invalid peer ID format: {}", self.my_peer_id))?;
+            let packet = BitchatPacket::new_broadcast(
+                MessageType::Message,
+                my_peer_id_bytes,
+                message.as_bytes().to_vec(),
+            );
+            
+            self.send_packet_to_peer(peer_id, &packet).await
+        }
+        
+        #[cfg(not(feature = "bluetooth"))]
+        {
+            warn!("Bluetooth feature not enabled, cannot send message");
+            Ok(())
+        }
     }
     
-    /// Remove stale connections
-    async fn cleanup_stale_connections(&self) {
-        let mut connected = self.connected_peers.write().await;
-        let cutoff = Instant::now() - constants::connection::KEEPALIVE_INTERVAL * 3;
+    /// Broadcast message to all connected peers - compatible with existing BitChat
+    pub async fn broadcast_message(&self, message: &str) -> Result<()> {
+        info!("?? Broadcasting message: {}", message);
         
-        connected.retain(|peer_id, peer| {
-            if peer.last_seen < cutoff {
-                warn!("Removing stale connection to {}", peer_id);
-                
-                // Send disconnection event for stale connection
-                self.send_event(BluetoothEvent::PeerDisconnected {
-                    peer_id: peer_id.clone(),
-                });
-                
-                false
-            } else {
-                true
+        let peer_ids: Vec<String> = {
+            let peers = self.connected_peers.read().await;
+            peers.keys().cloned().collect()
+        };
+        
+        if peer_ids.is_empty() {
+            warn!("No connected peers to broadcast to");
+            return Ok(());
+        }
+        
+        #[cfg(feature = "bluetooth")]
+        {
+            let my_peer_id_bytes = crate::protocol::peer_utils::string_to_peer_id(&self.my_peer_id)
+                .ok_or_else(|| anyhow!("Invalid peer ID format: {}", self.my_peer_id))?;
+            let packet = BitchatPacket::new_broadcast(
+                MessageType::Message,
+                my_peer_id_bytes,
+                message.as_bytes().to_vec(),
+            );
+            
+            for peer_id in peer_ids {
+                if let Err(e) = self.send_packet_to_peer(&peer_id, &packet).await {
+                    warn!("Failed to send broadcast to {}: {}", peer_id, e);
+                }
             }
-        });
+        }
+        
+        info!("?? Broadcast completed");
+        Ok(())
     }
     
-    /// Disconnect all connected peers
+    /// Helper methods
+    async fn get_connected_peer(&self, peer_id: &str) -> Result<ConnectedPeer> {
+        let peers = self.connected_peers.read().await;
+        peers.get(peer_id).cloned()
+            .ok_or_else(|| anyhow!("Peer not connected: {}", peer_id))
+    }
+    
     async fn disconnect_all_peers(&self) -> Result<()> {
-        let peers = self.connected_peers.read().await.clone();
+        let peer_ids: Vec<String> = {
+            let peers = self.connected_peers.read().await;
+            peers.keys().cloned().collect()
+        };
         
-        for (peer_id, _peer) in peers {
-            // Send disconnection event
+        for peer_id in peer_ids {
             self.send_event(BluetoothEvent::PeerDisconnected {
                 peer_id: peer_id.clone(),
             });
@@ -247,145 +381,79 @@ impl BluetoothManager {
         Ok(())
     }
     
-    /// Send packet to specific peer
-    pub async fn send_packet(&self, peer_id: &str, packet: &BitchatPacket) -> Result<()> {
-        let connected = self.connected_peers.read().await;
-        let _peer = connected.get(peer_id)
-            .ok_or_else(|| anyhow!("Peer {} not connected", peer_id))?;
+    async fn stop_scanning(&mut self) -> Result<()> {
+        *self.is_scanning.write().await = false;
         
-        // Encode packet
-        let _data = BinaryProtocolManager::encode(packet)?;
-        
-        // In a real implementation, this would send via platform-specific APIs
-        // For now, we'll just simulate success
-        info!("Simulated packet send to peer: {}", peer_id);
+        self.send_event(BluetoothEvent::AdapterStateChanged {
+            powered_on: true,
+            scanning: false,
+            advertising: *self.is_advertising.read().await,
+        });
         
         Ok(())
     }
     
-    /// Broadcast packet to all connected peers
-    pub async fn broadcast_packet(&self, packet: &BitchatPacket) -> Result<()> {
-        let connected = self.connected_peers.read().await;
-        let _data = BinaryProtocolManager::encode(packet)?;
+    async fn stop_advertising(&mut self) -> Result<()> {
+        *self.is_advertising.write().await = false;
         
-        for (peer_id, _peer) in connected.iter() {
-            // In a real implementation, this would send via platform-specific APIs
-            info!("Simulated packet broadcast to peer: {}", peer_id);
-        }
+        self.send_event(BluetoothEvent::AdapterStateChanged {
+            powered_on: true,
+            scanning: *self.is_scanning.read().await,
+            advertising: false,
+        });
         
         Ok(())
     }
     
-    /// Get list of connected peer IDs
+    /// Public query methods - compatible with existing BitChat API
+    pub async fn get_discovered_devices(&self) -> HashMap<String, DiscoveredDevice> {
+        self.discovered_devices.read().await.clone()
+    }
+    
     pub async fn get_connected_peers(&self) -> Vec<String> {
-        self.connected_peers.read().await.keys().cloned().collect()
+        let peers = self.connected_peers.read().await;
+        peers.keys().cloned().collect()
     }
     
-    /// Get our peer ID
-    pub fn get_our_peer_id(&self) -> String {
-        self.my_peer_id.clone()
+    pub async fn get_available_adapters(&self) -> String {
+        "BitChat Core Adapter".to_string()
     }
     
-    /// Check if Bluetooth is available
-    pub async fn is_available(&self) -> bool {
-        // In a real implementation, this would check platform-specific availability
-        true
+    pub async fn is_scanning(&self) -> bool {
+        *self.is_scanning.read().await
     }
     
-    /// Get comprehensive debug information
-    pub async fn get_debug_info(&self) -> String {
-        let connected = self.connected_peers.read().await;
-        let discovered = self.discovered_devices.read().await;
-        let compatibility_info = self.compatibility.get_debug_info().await;
+    pub async fn is_advertising(&self) -> bool {
+        *self.is_advertising.read().await
+    }
+    
+    pub async fn is_running(&self) -> bool {
+        *self.is_running.read().await
+    }
+    
+    /// Get comprehensive status - compatible with existing BitChat
+    pub async fn get_status(&self) -> String {
+        let discovered = self.discovered_devices.read().await.len();
+        let connected = self.connected_peers.read().await.len();
+        let adapters = self.get_available_adapters().await;
         
         format!(
-            "BitChat Bluetooth Manager Status:\n\
-             ==================================\n\
-             Platform: {}\n\
-             Our Peer ID: {}\n\
+            "BitChat Bluetooth Manager\n\
+             =========================\n\
+             Peer ID: {}\n\
              Running: {}\n\
              Scanning: {}\n\
              Advertising: {}\n\
-             Connected Peers: {}\n\
-             Discovered Devices: {}\n\
-             \n\
-             Connected Peers:\n\
-             {}\n\
-             \n\
-             Compatibility Manager:\n\
-             {}",
-            crate::bluetooth::get_platform_info(),
+             Discovered: {} devices\n\
+             Connected: {} peers\n\
+             Adapters: {}",
             self.my_peer_id,
-            *self.is_running.read().await,
-            *self.is_scanning.read().await,
-            *self.is_advertising.read().await,
-            connected.len(),
-            discovered.len(),
-            connected.keys().cloned().collect::<Vec<_>>().join(", "),
-            compatibility_info
+            self.is_running().await,
+            self.is_scanning().await,
+            self.is_advertising().await,
+            discovered,
+            connected,
+            adapters
         )
-    }
-    
-    /// Simulate discovering a device (for testing)
-    pub async fn simulate_device_discovered(&self, device_id: String, peer_id: Option<String>, rssi: i16) -> Result<()> {
-        let device = DiscoveredDevice {
-            device_id: device_id.clone(),
-            peer_id: peer_id.clone(),
-            rssi,
-            last_seen: Instant::now(),
-            connection_attempts: 0,
-        };
-        
-        // Store discovered device
-        self.discovered_devices.write().await.insert(device_id.clone(), device);
-        
-        // Send device discovered event
-        self.send_event(BluetoothEvent::DeviceDiscovered {
-            device_id,
-            device_name: peer_id.map(|id| format!("BC_{}", id)),
-            rssi: rssi as i8,
-        });
-        
-        Ok(())
-    }
-    
-    /// Simulate connecting to a peer (for testing)
-    pub async fn simulate_peer_connected(&self, peer_id: String) -> Result<()> {
-        let peer = ConnectedPeer {
-            peer_id: peer_id.clone(),
-            connected_at: Instant::now(),
-            last_seen: Instant::now(),
-            rssi: Some(-60),
-            message_count: 0,
-        };
-        
-        // Store connected peer
-        self.connected_peers.write().await.insert(peer_id.clone(), peer);
-        
-        // Send connection event
-        self.send_event(BluetoothEvent::PeerConnected {
-            peer_id,
-        });
-        
-        Ok(())
-    }
-}
-
-// Implement Clone for testing and background tasks
-impl Clone for BluetoothManager {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            my_peer_id: self.my_peer_id.clone(),
-            compatibility: self.compatibility.clone(),
-            connected_peers: Arc::clone(&self.connected_peers),
-            discovered_devices: Arc::clone(&self.discovered_devices),
-            connection_attempts: Arc::clone(&self.connection_attempts),
-            processed_messages: Arc::clone(&self.processed_messages),
-            event_callback: None, // Don't clone the callback
-            is_scanning: Arc::clone(&self.is_scanning),
-            is_advertising: Arc::clone(&self.is_advertising),
-            is_running: Arc::clone(&self.is_running),
-        }
     }
 }

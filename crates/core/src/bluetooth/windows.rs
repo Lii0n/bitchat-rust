@@ -146,23 +146,28 @@ impl WindowsBluetoothAdapter {
                       args: &Option<BluetoothLEAdvertisementReceivedEventArgs>| {
                     
                     if let Some(args) = args {
-                        // Clone the args for the async block
+                        // Clone the args for processing
                         let args = args.clone();
                         let discovered_devices = Arc::clone(&discovered_devices);
                         let my_peer_id = my_peer_id.clone();
                         
-                        // Use a blocking spawn instead of async
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Runtime::new().unwrap();
-                            rt.block_on(async move {
-                                if let Err(e) = WindowsBluetoothAdapter::handle_advertisement_received(
-                                    &args, 
-                                    &discovered_devices, 
-                                    &my_peer_id
-                                ).await {
-                                    error!("Failed to handle advertisement: {}", e);
-                                }
-                            });
+                        // Process the advertisement immediately to avoid Send issues
+                        let rt = match tokio::runtime::Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(e) => {
+                                error!("Failed to create runtime: {}", e);
+                                return Ok(());
+                            }
+                        };
+                        
+                        rt.block_on(async move {
+                            if let Err(e) = WindowsBluetoothAdapter::handle_advertisement_received(
+                                &args, 
+                                &discovered_devices, 
+                                &my_peer_id
+                            ).await {
+                                error!("Failed to handle advertisement: {}", e);
+                            }
                         });
                     }
                     Ok(())
@@ -276,34 +281,16 @@ impl WindowsBluetoothAdapter {
         let device_id = format!("{:012X}", device_address);
         let rssi = args.RawSignalStrengthInDBm()?;
         
-        // DEBUG: Always log what we receive
-        info!("?? BLE Advertisement received:");
-        info!("   Device ID: {}", device_id);
-        info!("   RSSI: {} dBm", rssi);
-        
         // Check if this is a BitChat device by examining the advertisement
         let mut is_bitchat_device = false;
         let mut peer_id: Option<String> = None;
-        let mut debug_info = Vec::new();
         
         // Method 1: Check for BitChat service UUID in service list
         if let Ok(advertisement) = args.Advertisement() {
             if let Ok(service_uuids) = advertisement.ServiceUuids() {
                 let service_count = service_uuids.Size().unwrap_or(0);
-                debug_info.push(format!("   Service UUIDs: {} found", service_count));
-                
                 for i in 0..service_count {
                     if let Ok(service_uuid) = service_uuids.GetAt(i) {
-                        let uuid_str = format!("{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-                            service_uuid.data1,
-                            service_uuid.data2,
-                            service_uuid.data3,
-                            service_uuid.data4[0], service_uuid.data4[1],
-                            service_uuid.data4[2], service_uuid.data4[3], service_uuid.data4[4],
-                            service_uuid.data4[5], service_uuid.data4[6], service_uuid.data4[7]
-                        );
-                        debug_info.push(format!("     Service {}: {}", i, uuid_str));
-                        
                         // Convert GUID to UUID bytes for comparison
                         let uuid_bytes = [
                             (service_uuid.data1 >> 24) as u8,
@@ -327,7 +314,7 @@ impl WindowsBluetoothAdapter {
                         // Check if this matches the BitChat service UUID
                         if uuid_bytes == *BITCHAT_SERVICE.as_bytes() {
                             is_bitchat_device = true;
-                            debug_info.push(format!("     ? BITCHAT SERVICE FOUND!"));
+                            debug!("Found BitChat service UUID in advertisement!");
                             break;
                         }
                     }
@@ -337,38 +324,29 @@ impl WindowsBluetoothAdapter {
             // Method 2: Check device name for BitChat format (BC_<peer_id>)
             if let Ok(local_name) = advertisement.LocalName() {
                 let name = local_name.to_string();
-                debug_info.push(format!("   Device Name: '{}'", name));
                 
                 if name.starts_with("BC_") && name.len() == 19 { // BC_ + 16 hex chars
                     let extracted_peer_id = &name[3..];
                     if Self::is_valid_peer_id(extracted_peer_id) {
                         is_bitchat_device = true;
                         peer_id = Some(extracted_peer_id.to_uppercase());
-                        debug_info.push(format!("     ? BITCHAT NAME FOUND! Peer: {}", extracted_peer_id));
+                        debug!("Found BitChat device by name: {} -> peer ID: {}", name, extracted_peer_id);
                     }
-                } else if name.is_empty() {
-                    debug_info.push(format!("     (No device name)"));
                 }
-            } else {
-                debug_info.push(format!("   Device Name: (unavailable)"));
             }
             
             // Method 3: Check manufacturer data for BitChat signature
             if let Ok(manufacturer_data_list) = advertisement.ManufacturerData() {
                 let data_count = manufacturer_data_list.Size().unwrap_or(0);
-                debug_info.push(format!("   Manufacturer Data: {} entries", data_count));
-                
                 for i in 0..data_count {
                     if let Ok(manufacturer_data) = manufacturer_data_list.GetAt(i) {
                         if let Ok(company_id) = manufacturer_data.CompanyId() {
-                            debug_info.push(format!("     Company ID {}: 0x{:04X}", i, company_id));
-                            
                             // Check for our company ID (0xFFFF)
                             if company_id == 0xFFFF {
                                 if let Ok(_data_buffer) = manufacturer_data.Data() {
                                     // Try to extract peer ID from manufacturer data
                                     is_bitchat_device = true;
-                                    debug_info.push(format!("     ? BITCHAT MANUFACTURER DATA FOUND!"));
+                                    debug!("Found BitChat manufacturer data");
                                 }
                             }
                         }
@@ -377,25 +355,20 @@ impl WindowsBluetoothAdapter {
             }
         }
         
-        // Print all debug info
-        for line in debug_info {
-            info!("{}", line);
-        }
-        
         // If this is a BitChat device, process it
         if is_bitchat_device {
             // Generate a peer ID if we don't have one
             if peer_id.is_none() {
                 // Use device address as fallback peer ID
                 peer_id = Some(format!("{:016X}", device_address));
-                info!("   Generated fallback peer ID: {}", peer_id.as_ref().unwrap());
+                debug!("Generated fallback peer ID: {}", peer_id.as_ref().unwrap());
             }
             
             let final_peer_id = peer_id.unwrap();
             
             // Skip our own advertisements
             if final_peer_id == my_peer_id {
-                info!("   ?? Skipping our own advertisement");
+                debug!("Ignoring our own advertisement");
                 return Ok(());
             }
             
@@ -415,18 +388,13 @@ impl WindowsBluetoothAdapter {
             drop(devices);
             
             if is_new {
-                info!("?? NEW BITCHAT DEVICE: {} (peer: {}, RSSI: {} dBm)", 
-                      device_id, final_peer_id, rssi);
+                info!("?? NEW BitChat peer discovered: {} (RSSI: {} dBm)", final_peer_id, rssi);
             } else {
-                info!("?? Updated BitChat device: {} (peer: {}, RSSI: {} dBm)", 
-                       device_id, final_peer_id, rssi);
+                debug!("Updated BitChat device: {} (RSSI: {} dBm)", final_peer_id, rssi);
             }
-        } else {
-            // For non-BitChat devices, just show basic info (reduce spam)
-            debug!("   ? Not a BitChat device");
         }
+        // Don't log non-BitChat devices at all to reduce spam
         
-        info!(""); // Empty line for readability
         Ok(())
     }
     
