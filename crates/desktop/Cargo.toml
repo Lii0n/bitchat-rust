@@ -14,3 +14,18 @@ tracing-subscriber = { workspace = true }
 dirs = { workspace = true }  
 hex = { workspace = true }  
 winapi = { version = "0.3", features = ["winuser", "wingdi"] }
+
+[features]
+default = ["bluetooth"]
+bluetooth = []
+
+# Make sure Windows dependencies are available
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52", features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement", 
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+] }
