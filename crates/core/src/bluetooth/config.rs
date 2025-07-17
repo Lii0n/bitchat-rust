@@ -103,7 +103,7 @@ impl BluetoothConfig {
     
     /// Get advertisement name for Bluetooth
     pub fn advertisement_name(&self) -> String {
-        format!("BC_{}", self.device_name)
+        self.device_name.clone()
     }
     
     /// Get peer ID as string

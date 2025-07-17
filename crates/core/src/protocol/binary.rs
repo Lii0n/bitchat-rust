@@ -1187,19 +1187,25 @@ pub mod peer_utils {
     
     /// Extract peer ID from device name
     pub fn extract_peer_id_from_device_name(device_name: &str) -> Option<String> {
-        // Check for BitChat format: "BC_ABCD1234EFGH5678" 
-        if device_name.starts_with("BC_") && device_name.len() == 19 { // BC_ + 16 hex chars
+        // iOS/macOS format: Just 16 hex characters (priority format)
+        if device_name.len() == 16 && is_valid_peer_id_string(device_name) {
+            return Some(device_name.to_uppercase());
+        }
+    
+        // Legacy Windows format: "BC_ABCD1234EFGH5678" (for backward compatibility)
+        if device_name.starts_with("BC_") && device_name.len() == 19 { 
             let peer_id = &device_name[3..];
             if is_valid_peer_id_string(peer_id) {
                 return Some(peer_id.to_uppercase());
             }
         }
+    
         None
     }
     
     /// Create advertisement name from peer ID
     pub fn create_advertisement_name(peer_id: &str) -> String {
-        format!("BC_{}", peer_id)
+        peer_id.to_uppercase()  // iOS/macOS compatible format
     }
     
     /// Determine if we should initiate connection based on peer ID comparison

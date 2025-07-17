@@ -328,14 +328,25 @@ impl CompatibilityManager {
     }
 }
 
-/// Extract peer ID from device name
+/// Extract peer ID from device name - UPDATED FOR iOS COMPATIBILITY
 fn extract_peer_id_from_device_name(device_name: &str) -> Option<String> {
-    // Check for BitChat format: "BC_ABCD1234" 
+    // iOS/macOS format: Just 16 hex characters (new priority format)
+    if device_name.len() == 16 && is_valid_16_char_hex(device_name) {
+        return Some(device_name.to_uppercase());
+    }
+    
+    // Legacy Windows format: "BC_ABCD1234EFGH5678" (for backward compatibility)
     if device_name.starts_with("BC_") && device_name.len() == 19 { // BC_ + 16 hex chars
         let peer_id = &device_name[3..];
-        if peer_id::is_valid_peer_id_string(peer_id) {
+        if is_valid_16_char_hex(peer_id) {
             return Some(peer_id.to_uppercase());
         }
     }
+    
     None
+}
+
+/// Check if string is valid 16-character hex
+fn is_valid_16_char_hex(s: &str) -> bool {
+    s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
 }

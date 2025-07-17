@@ -128,9 +128,8 @@ impl WinRTDeviceDiscovery {
             // Create advertisement
             let advertisement = BluetoothLEAdvertisement::new()?;
             
-            // Set device name (BitChat format: BC_<peer_id>)
-            let device_name = format!("BC_{}", self.my_peer_id);
-            advertisement.SetLocalName(&HSTRING::from(device_name))?;
+            // Set device name
+            advertisement.SetLocalName(&HSTRING::from(&self.my_peer_id))?;
             
             // Add BitChat service UUID
             let service_uuid_bytes = BITCHAT_SERVICE.as_bytes();
