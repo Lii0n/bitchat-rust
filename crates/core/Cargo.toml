@@ -65,6 +65,11 @@ windows = { version = "0.52", features = [
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_System_WinRT",
+    "Win32_System_SystemInformation",  
+    "Win32_Security",                  
+    "Win32_System_Threading",          
+    "System_Power",          
+    "Win32_Security_Authorization",  
 ] }
 tokio-stream = "0.1"
 

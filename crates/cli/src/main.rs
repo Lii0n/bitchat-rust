@@ -531,6 +531,41 @@ async fn handle_interactive_command(core: &BitchatCore, command: &str) -> anyhow
         "/quit" | "/q" | "/exit" => {
             return Ok(true);
         }
+        // ADD THIS NEW COMMAND HERE:
+        "/diagnose" | "/diagnostic" | "/ble-check" => {
+            #[cfg(feature = "bluetooth")]
+            {
+                println!("🔍 Running Bluetooth LE Advertising Diagnostics...\n");
+                
+                if let Some(adapter_ref) = REAL_BLUETOOTH.get() {
+                    if let Some(ref adapter) = *adapter_ref.lock().await {
+                        let diagnostic_report = adapter.diagnose_advertising_support().await;
+                        println!("{}", diagnostic_report);
+                        
+                        println!("💡 QUICK CHECKLIST:");
+                        println!("   □ Windows 10/11 (Build 17134+)");
+                        println!("   □ Bluetooth 4.0+ adapter");
+                        println!("   □ Updated Bluetooth drivers");
+                        println!("   □ Running as Administrator");
+                        println!("   □ Bluetooth discoverable setting ON");
+                        println!("   □ Privacy settings allow Bluetooth access");
+                        println!("   □ Battery saver mode OFF");
+                        println!("\n💡 Run this diagnostic to see what needs fixing!");
+                    } else {
+                        println!("❌ No Bluetooth adapter available - adapter not initialized");
+                        println!("💡 Try restarting the CLI to initialize the adapter");
+                    }
+                } else {
+                    println!("❌ No Bluetooth adapter available - feature not active");
+                    println!("💡 Make sure you're running with --features bluetooth");
+                }
+            }
+            #[cfg(not(feature = "bluetooth"))]
+            {
+                println!("❌ Bluetooth feature not enabled");
+                println!("💡 Rebuild with: cargo build --features bluetooth");
+            }
+        }
         _ => {
             println!("❓ Unknown command: {}", command);
             println!("💡 Type /help for available commands");
@@ -812,6 +847,7 @@ fn show_help() {
     println!("🔧 System:");
     println!("  /status, /s        - Show full system status");
     println!("  /debug, /d         - Comprehensive system debug");
+    println!("  /diagnose          - Bluetooth LE advertising diagnostics"); // ADD THIS LINE
     println!("  /trace             - Enable maximum logging");
     println!("  /clear             - Clear screen");
     println!("  /help, /h          - Show this help");
@@ -822,6 +858,7 @@ fn show_help() {
     println!("  This CLI now uses REAL Bluetooth with proper BitChat protocol");
     println!("  macOS BitChat devices should discover this peer automatically");
     println!("  Use '/status' to verify advertising is active for macOS discovery");
+    println!("  Use '/diagnose' to troubleshoot advertising issues");  // ADD THIS LINE
     println!();
     
     println!("💡 Quick BitChat Protocol Info:");
