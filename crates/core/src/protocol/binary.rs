@@ -1119,10 +1119,6 @@ pub mod peer_utils {
         rand::thread_rng().gen()
     }
     
-    /// Check if peer ID is valid (not all zeros)
-    pub fn is_valid_peer_id(peer_id: &[u8; 8]) -> bool {
-        !peer_id.iter().all(|&b| b == 0)
-    }
     
     /// Convert peer ID to hex string
     pub fn peer_id_to_string(peer_id: &[u8; 8]) -> String {
@@ -1183,29 +1179,6 @@ pub mod peer_utils {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&decoded);
         Ok(bytes)
-    }
-    
-    /// Extract peer ID from device name
-    pub fn extract_peer_id_from_device_name(device_name: &str) -> Option<String> {
-        // iOS/macOS format: Just 16 hex characters (priority format)
-        if device_name.len() == 16 && is_valid_peer_id_string(device_name) {
-            return Some(device_name.to_uppercase());
-        }
-    
-        // Legacy Windows format: "BC_ABCD1234EFGH5678" (for backward compatibility)
-        if device_name.starts_with("BC_") && device_name.len() == 19 { 
-            let peer_id = &device_name[3..];
-            if is_valid_peer_id_string(peer_id) {
-                return Some(peer_id.to_uppercase());
-            }
-        }
-    
-        None
-    }
-    
-    /// Create advertisement name from peer ID
-    pub fn create_advertisement_name(peer_id: &str) -> String {
-        peer_id.to_uppercase()  // iOS/macOS compatible format
     }
     
     /// Determine if we should initiate connection based on peer ID comparison

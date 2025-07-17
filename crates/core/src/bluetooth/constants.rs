@@ -90,4 +90,18 @@ pub mod peer_id {
         bytes.copy_from_slice(&decoded);
         Ok(bytes)
     }
+    /// Extract peer ID from device name (iOS/macOS and Windows compatible)
+    pub fn extract_peer_id_from_device_name(device_name: &str) -> Option<String> {
+        // iOS/macOS format: Just 16 hex characters (priority format)
+        if device_name.len() == 16 && is_valid_peer_id_string(device_name) {
+            return Some(device_name.to_uppercase());
+        }
+
+        None
+    }
+
+    /// Create advertisement name from peer ID (iOS/macOS compatible)
+    pub fn create_advertisement_name(peer_id: &str) -> String {
+        peer_id.to_uppercase()  // iOS/macOS compatible format (just the peer ID)
+    }
 }
