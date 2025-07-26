@@ -1,79 +1,62 @@
 ﻿[package]
 name = "bitchat-core"
-version = "0.1.0"
+version = "0.2.0"  # Bump version for Moon protocol
 edition = "2021"
+description = "Core BitChat protocol implementation with Moon Protocol support"
+license = "Unlicense"
+repository = "https://github.com/yourusername/bitchat-rust"
 
 [dependencies]
-# Async runtime
+# Core dependencies
 tokio = { workspace = true }
 futures = { workspace = true }
-
-# Cryptography
-chacha20poly1305 = { workspace = true }
-x25519-dalek = { workspace = true }
-ed25519-dalek = { workspace = true }
-sha2 = "0.10"
-hkdf = "0.12"
-hmac = "0.12"
-argon2 = "0.5"
-blake3 = "1.4"
-snow = "0.9"
-ring = { workspace = true }
-
-# Memory safety
-zeroize = { version = "1.6", features = ["derive"] }
-subtle = "2.5"
-
-# Random number generation
-rand = { workspace = true }
-rand_core = "0.6"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Networking and protocols
-bytes = "1.0"
-
-# Bluetooth (optional - may need platform-specific features)
-btleplug = { workspace = true, optional = true }
-
-# Utilities
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+# NEW: Moon Protocol Dependencies
+snow = { workspace = true }
 hex = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
 
-# File system
-dirs = { workspace = true }
+# Cryptography
+ring = { workspace = true }
+chacha20poly1305 = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+argon2 = { workspace = true }
+blake3 = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+rand_core = { workspace = true }
 
-lz4 = "1.24"
+# Utilities
+dirs = { workspace = true }  
+bytes = { workspace = true }
+tokio-stream = { workspace = true }
+toml = { workspace = true }
+lz4 = { workspace = true }
+
+# Platform-specific Bluetooth dependencies (conditional)
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(not(windows))'.dependencies]
+btleplug = { workspace = true }
 
 [features]
-default = ["bluetooth"]
-bluetooth = []
+default = []
+bluetooth = []  # Feature flag to enable Bluetooth functionality
 
-# Windows-specific Bluetooth support
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.52", features = [
-    "Devices_Bluetooth",
-    "Devices_Bluetooth_Advertisement", 
-    "Devices_Bluetooth_GenericAttributeProfile",
-    "Foundation",
-    "Foundation_Collections",
-    "Storage_Streams",
-    "Win32_Foundation",
-    "Win32_System_WinRT",
-    "Win32_System_SystemInformation",  
-    "Win32_Security",                  
-    "Win32_System_Threading",          
-    "System_Power",          
-    "Win32_Security_Authorization",  
-] }
-tokio-stream = "0.1"
-
-# Keep btleplug as fallback for other platforms
-[target.'cfg(not(windows))'.dependencies]
-btleplug = { version = "0.11", optional = true }
+[dev-dependencies]
+tokio-test = "0.4"

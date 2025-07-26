@@ -1,21 +1,24 @@
 ﻿[workspace]
 members = [
     "crates/core",
-    "crates/cli", 
-    "crates/desktop"
+    "crates/desktop",
+    "crates/cli",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 # Core async runtime
 tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
 anyhow = "1.0"
+thiserror = "1.0"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # NEW: Moon Protocol Dependencies
@@ -24,22 +27,24 @@ hex = "0.4"            # Hex encoding for peer IDs and keys
 rand = "0.8"           # Cryptographically secure RNG
 sha2 = "0.10"          # SHA-256 hashing
 
-# Cryptography (keeping for compatibility)
-ed25519-dalek = "2.0"
-chacha20poly1305 = "0.10"  # Required by Noise Protocol
+# Cryptography (existing)
+ring = "0.17"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+hkdf = "0.12"
+hmac = "0.12"
+argon2 = "0.5"
+blake3 = "1.4"
+zeroize = { version = "1.6", features = ["derive"] }
+subtle = "2.5"
+rand_core = "0.6"
 
-# Compression
-lz4_flex = "0.11"
+# Bluetooth LE (remove optional here)
+btleplug = { version = "0.11", default-features = false }
 
-# Bluetooth LE
-[workspace.dependencies.btleplug]
-version = "0.11"
-optional = true
-
-# Windows-specific Bluetooth
-[workspace.dependencies.windows]
-version = "0.52"
-features = [
+# Windows-specific Bluetooth (remove optional here)
+windows = { version = "0.52", features = [
     "Win32_Devices_Bluetooth",
     "Win32_Devices_Enumeration",
     "Win32_Foundation",
@@ -48,21 +53,44 @@ features = [
     "Devices_Bluetooth",
     "Devices_Bluetooth_Advertisement",
     "Devices_Bluetooth_GenericAttributeProfile",
-]
-optional = true
+] }
 
-# GUI dependencies
-eframe = "0.24"
-egui = "0.24"
+# UI framework
+eframe = { version = "0.28", default-features = false, features = ["glow", "persistence"] }
+egui = "0.28"
 
-# CLI dependencies  
+# CLI dependencies
 clap = { version = "4.0", features = ["derive"] }
+crossterm = "0.27"
+ratatui = "0.24"
+dialoguer = "0.11"
+
+# Utilities
+dirs = "5.0"
+bytes = "1.0"
+tokio-stream = "0.1"
+toml = "0.8"
+
+# Compression
+lz4 = "1.24"
 
 [profile.release]
-opt-level = 3
+opt-level = 2
 lto = true
 codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+debug = false
 
 [profile.dev]
-opt-level = 0
+opt-level = 1
+overflow-checks = true
 debug = true
+
+[profile.raspberry-pi]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
