@@ -35,7 +35,8 @@ use windows::{
     Storage::Streams::DataReader,
 };
 
-use crate::bluetooth::constants::service_uuids::BITCHAT_SERVICE;
+// FIXED: Import from correct location
+use crate::bluetooth::constants::BITCHAT_SERVICE;
 
 // Add hex crate import
 use hex;
@@ -203,7 +204,7 @@ impl WindowsBluetoothAdapter {
         Ok(())
     }
     
-    /// Start advertising as BitChat device with Windows compatibility fixes
+    /// Start advertising as BitChat device with iOS/macOS compatibility
     pub async fn start_advertising(&mut self, _advertisement_data: &[u8]) -> Result<()> {
         info!("Starting BitChat-compatible Bluetooth LE advertising...");
     
@@ -214,57 +215,56 @@ impl WindowsBluetoothAdapter {
     
         #[cfg(windows)]
         {
-            // PERFECT: Based on your error analysis, Windows needs:
-            // 1. Non-empty payload (0x8007000D told us this)
-            // 2. But simple parameters (0x80070057 told us this)
-            
             let publisher = BluetoothLEAdvertisementPublisher::new()?;
             let advertisement = publisher.Advertisement()?;
         
-            // STRATEGY 1: Only device name (simple but non-empty)
-            let device_name = format!("BC_{}", &self.my_peer_id[..8]);
+            // FIXED: Use iOS/macOS compatible format - just the peer ID (no BC_ prefix)
+            let device_name = self.my_peer_id.clone();
             advertisement.SetLocalName(&HSTRING::from(&device_name))?;
-        
-            // STRATEGY 2: If device name fails, try only manufacturer data
+            info!("📱 Advertising with iOS/macOS compatible name: {}", device_name);
+            
             let mut success = false;
             
-            // Try with just device name first
+            // Try with just device name first (iOS/macOS compatible)
             match publisher.Start() {
                 Ok(_) => {
                     success = true;
                     self.publisher = Some(publisher);
                     *self.is_advertising.write().await = true;
-                    info!("🔵 ✅ DEVICE-NAME-ONLY advertising SUCCESS!");
-                    info!("📱 Device name: {} (BitChat discoverable)", device_name);
+                    info!("🔵 ✅ iOS/macOS COMPATIBLE advertising SUCCESS!");
+                    info!("📱 Device name: {} (BitChat discoverable by iOS/macOS)", device_name);
                 }
                 Err(e) => {
-                    warn!("Device name advertising failed: {}, trying manufacturer data only", e);
+                    warn!("iOS/macOS format advertising failed: {}, trying manufacturer data", e);
                     
-                    // STRATEGY 2: Try manufacturer data only (this provides non-empty payload)
+                    // STRATEGY 2: Try with manufacturer data (fallback)
                     let publisher2 = BluetoothLEAdvertisementPublisher::new()?;
                     let advertisement2 = publisher2.Advertisement()?;
                     
-                    // Add minimal manufacturer data (this satisfies "non-empty payload" requirement)
+                    // Set device name again
+                    advertisement2.SetLocalName(&HSTRING::from(&device_name))?;
+                    
+                    // Add minimal manufacturer data
                     match advertisement2.ManufacturerData() {
                         Ok(mfg_data_list) => {
                             let mfg_data = windows::Devices::Bluetooth::Advertisement::BluetoothLEManufacturerData::new()?;
-                            mfg_data.SetCompanyId(0xFFFF)?; // Unassigned company ID
+                            mfg_data.SetCompanyId(0xFFFF)?; // Unassigned company ID for BitChat
                             
-                            // Minimal payload: just 4 bytes of peer ID
-                            let payload = &self.my_peer_id.as_bytes()[..4.min(self.my_peer_id.len())];
-                            let data_writer = windows::Storage::Streams::DataWriter::new()?;
-                            data_writer.WriteBytes(payload)?;
-                            mfg_data.SetData(&data_writer.DetachBuffer()?)?;
-                            
-                            mfg_data_list.Append(&mfg_data)?;
+                            // Add peer ID as manufacturer data
+                            if let Ok(peer_id_bytes) = hex::decode(&self.my_peer_id) {
+                                let data_writer = windows::Storage::Streams::DataWriter::new()?;
+                                data_writer.WriteBytes(&peer_id_bytes)?;
+                                mfg_data.SetData(&data_writer.DetachBuffer()?)?;
+                                mfg_data_list.Append(&mfg_data)?;
+                            }
                             
                             match publisher2.Start() {
                                 Ok(_) => {
                                     success = true;
                                     self.publisher = Some(publisher2);
                                     *self.is_advertising.write().await = true;
-                                    info!("🔵 ✅ MANUFACTURER-DATA-ONLY advertising SUCCESS!");
-                                    info!("📱 Broadcasting minimal BitChat signature");
+                                    info!("🔵 ✅ MANUFACTURER-DATA advertising SUCCESS!");
+                                    info!("📱 Broadcasting BitChat signature with peer ID");
                                 }
                                 Err(e) => {
                                     warn!("Manufacturer data advertising also failed: {}", e);
@@ -279,37 +279,33 @@ impl WindowsBluetoothAdapter {
             }
             
             if !success {
-                // STRATEGY 3: Last resort - try with simple service UUID only
-                warn!("Trying last resort: single service UUID only");
+                // STRATEGY 3: Last resort - try with service UUID only
+                warn!("Trying last resort: BitChat service UUID only");
                 let publisher3 = BluetoothLEAdvertisementPublisher::new()?;
                 let advertisement3 = publisher3.Advertisement()?;
                 
-                // Try with just one simple service UUID (this provides non-empty payload)
+                // Try with BitChat service UUID
                 match advertisement3.ServiceUuids() {
                     Ok(service_uuids) => {
-                        // Use a simple, standard service UUID that Windows should accept
-                        let simple_guid = windows::core::GUID::from_values(
-                            0x1234, 0x5678, 0x9ABC, 
-                            [0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]
-                        );
-                        
-                        match service_uuids.Append(simple_guid) {
-                            Ok(_) => {
-                                match publisher3.Start() {
-                                    Ok(_) => {
-                                        success = true;
-                                        self.publisher = Some(publisher3);
-                                        *self.is_advertising.write().await = true;
-                                        info!("🔵 ✅ SIMPLE-UUID-ONLY advertising SUCCESS!");
-                                        info!("📱 Broadcasting with simple service UUID");
-                                    }
-                                    Err(e) => {
-                                        warn!("❌ Even simple UUID advertising failed: {}", e);
+                        if let Ok(bitchat_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
+                            match service_uuids.Append(bitchat_guid) {
+                                Ok(_) => {
+                                    match publisher3.Start() {
+                                        Ok(_) => {
+                                            success = true;
+                                            self.publisher = Some(publisher3);
+                                            *self.is_advertising.write().await = true;
+                                            info!("🔵 ✅ BITCHAT-UUID advertising SUCCESS!");
+                                            info!("📱 Broadcasting with BitChat service UUID");
+                                        }
+                                        Err(e) => {
+                                            warn!("❌ BitChat UUID advertising failed: {}", e);
+                                        }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                warn!("Cannot add simple UUID: {}", e);
+                                Err(e) => {
+                                    warn!("Cannot add BitChat UUID: {}", e);
+                                }
                             }
                         }
                     }
@@ -386,23 +382,45 @@ impl WindowsBluetoothAdapter {
             }
         }
         
-        // Method 2: Check device name for BitChat format
+        // Method 2: Check device name for BitChat format - FIXED FOR iOS/macOS COMPATIBILITY
         if let Ok(local_name) = advertisement.LocalName() {
             let name = local_name.to_string();
             
-            // iOS/macOS format: just peer ID (16 hex chars)
+            // PRIORITY: iOS/macOS format - just peer ID (16 hex chars)
             if name.len() == 16 && name.chars().all(|c| c.is_ascii_hexdigit()) {
                 is_bitchat_device = true;
                 peer_id = Some(name.to_uppercase());
                 debug!("Found iOS/macOS BitChat device by name: {}", name);
             }
-            // Windows format: BC_<peer_id>
+            // COMPATIBILITY: Windows format - BC_<peer_id> (for backward compatibility)
             else if name.starts_with("BC_") && name.len() >= 11 {
-                let extracted_peer_id = name.chars().skip(3).take(16).collect::<String>();
+                let extracted_peer_id = name.chars().skip(3).collect::<String>();
+                // Accept any length >= 8 hex chars for compatibility
                 if extracted_peer_id.len() >= 8 && extracted_peer_id.chars().all(|c| c.is_ascii_hexdigit()) {
                     is_bitchat_device = true;
-                    peer_id = Some(extracted_peer_id.to_uppercase());
-                    debug!("Found Windows BitChat device by name: {}", name);
+                    // Take first 16 chars if longer, pad if shorter
+                    let normalized_peer_id = if extracted_peer_id.len() >= 16 {
+                        extracted_peer_id.chars().take(16).collect::<String>()
+                    } else {
+                        format!("{:0<16}", extracted_peer_id) // Pad with zeros if needed
+                    };
+                    peer_id = Some(normalized_peer_id.to_uppercase());
+                    debug!("Found Windows BitChat device by name: {} -> {}", name, peer_id.as_ref().unwrap());
+                }
+            }
+            // COMPATIBILITY: Pi format - Pi_<peer_id> or similar
+            else if name.contains("_") {
+                if let Some(extracted_peer_id) = name.split('_').last() {
+                    if extracted_peer_id.len() >= 8 && extracted_peer_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                        is_bitchat_device = true;
+                        let normalized_peer_id = if extracted_peer_id.len() >= 16 {
+                            extracted_peer_id.chars().take(16).collect::<String>()
+                        } else {
+                            format!("{:0<16}", extracted_peer_id)
+                        };
+                        peer_id = Some(normalized_peer_id.to_uppercase());
+                        debug!("Found Pi BitChat device by name: {} -> {}", name, peer_id.as_ref().unwrap());
+                    }
                 }
             }
         }
@@ -724,26 +742,23 @@ impl WindowsBluetoothAdapter {
                     Ok(advertisement) => {
                         results.push_str("   ✅ Can create BluetoothLEAdvertisement\n");
                         
-                        // Test 3: Try setting local name
-                        match advertisement.SetLocalName(&windows::core::HSTRING::from("TestDevice")) {
-                            Ok(_) => results.push_str("   ✅ Can set device name\n"),
+                        // Test 3: Try setting local name (iOS/macOS compatible format)
+                        match advertisement.SetLocalName(&windows::core::HSTRING::from(&self.my_peer_id)) {
+                            Ok(_) => results.push_str("   ✅ Can set iOS/macOS compatible device name\n"),
                             Err(e) => results.push_str(&format!("   ❌ Cannot set device name: {}\n", e)),
                         }
                         
-                        // Test 4: Try adding service UUID
+                        // Test 4: Try adding BitChat service UUID
                         match advertisement.ServiceUuids() {
                             Ok(service_uuids) => {
                                 results.push_str("   ✅ Can access service UUID collection\n");
                                 
-                                // Try to add a test service UUID
-                                let test_guid = windows::core::GUID::from_values(
-                                    0x12345678, 0x1234, 0x1234, 
-                                    [0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF]
-                                );
-                                
-                                match service_uuids.Append(test_guid) {
-                                    Ok(_) => results.push_str("   ✅ Can add service UUIDs\n"),
-                                    Err(e) => results.push_str(&format!("   ❌ Cannot add service UUIDs: {}\n", e)),
+                                // Try to add BitChat service UUID
+                                if let Ok(bitchat_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
+                                    match service_uuids.Append(bitchat_guid) {
+                                        Ok(_) => results.push_str("   ✅ Can add BitChat service UUID\n"),
+                                        Err(e) => results.push_str(&format!("   ❌ Cannot add BitChat service UUID: {}\n", e)),
+                                    }
                                 }
                             }
                             Err(e) => results.push_str(&format!("   ❌ Cannot access service UUIDs: {}\n", e)),
@@ -843,7 +858,7 @@ impl WindowsBluetoothAdapter {
     fn generate_recommendations(&self) -> String {
         let mut recommendations = String::new();
         
-        recommendations.push_str("   📋 TO ENABLE ADVERTISING:\n\n");
+        recommendations.push_str("   📋 TO ENABLE iOS/macOS DISCOVERY:\n\n");
         recommendations.push_str("   1. UPDATE SYSTEM:\n");
         recommendations.push_str("      - Update to Windows 10/11 latest version\n");
         recommendations.push_str("      - Update Bluetooth drivers\n");
@@ -868,10 +883,15 @@ impl WindowsBluetoothAdapter {
         recommendations.push_str("      - External USB Bluetooth adapters often work better\n");
         recommendations.push_str("      - Intel and Qualcomm adapters generally have better support\n\n");
         
-        recommendations.push_str("   6. ALTERNATIVE APPROACH:\n");
-        recommendations.push_str("      - Use mobile devices (iPhone/Android) for advertising\n");
+        recommendations.push_str("   6. BITCHAT COMPATIBILITY VERIFICATION:\n");
+        recommendations.push_str("      - Device name format: 16 hex characters (iOS/macOS compatible)\n");
+        recommendations.push_str("      - Service UUID: F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C\n");
+        recommendations.push_str("      - Company ID: 0xFFFF for manufacturer data\n\n");
+        
+        recommendations.push_str("   7. ALTERNATIVE APPROACH:\n");
+        recommendations.push_str("      - Use Raspberry Pi for reliable advertising\n");
         recommendations.push_str("      - Windows devices can still discover and connect\n");
-        recommendations.push_str("      - This is the most reliable setup for now\n");
+        recommendations.push_str("      - This is the most reliable setup for BitChat mesh\n");
         
         recommendations
     }

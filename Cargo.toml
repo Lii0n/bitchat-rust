@@ -1,51 +1,68 @@
 ﻿[workspace]
-resolver = "2"
 members = [
     "crates/core",
-    "crates/desktop",
-    "crates/cli",
+    "crates/cli", 
+    "crates/desktop"
 ]
+resolver = "2"
 
 [workspace.dependencies]
-# Async runtime
+# Core async runtime
 tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
-
-# Bluetooth
-btleplug = "0.11"
-
-# Cryptography  
-ring = "0.17"
-chacha20poly1305 = "0.10"
-x25519-dalek = "2.0"
-ed25519-dalek = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 
-# UI (Desktop) - Fix Windows winapi issue
-eframe = { version = "0.24", default-features = false, features = ["default_fonts", "glow"] }
+# NEW: Moon Protocol Dependencies
+snow = "0.9"           # Noise Protocol Framework
+hex = "0.4"            # Hex encoding for peer IDs and keys
+rand = "0.8"           # Cryptographically secure RNG
+sha2 = "0.10"          # SHA-256 hashing
+
+# Cryptography (keeping for compatibility)
+ed25519-dalek = "2.0"
+chacha20poly1305 = "0.10"  # Required by Noise Protocol
+
+# Compression
+lz4_flex = "0.11"
+
+# Bluetooth LE
+[workspace.dependencies.btleplug]
+version = "0.11"
+optional = true
+
+# Windows-specific Bluetooth
+[workspace.dependencies.windows]
+version = "0.52"
+features = [
+    "Win32_Devices_Bluetooth",
+    "Win32_Devices_Enumeration",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Storage_Streams",
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+]
+optional = true
+
+# GUI dependencies
+eframe = "0.24"
 egui = "0.24"
-winapi = { version = "0.3", features = ["winuser", "wingdi", "winbase", "wincon"] }
 
-# CLI
+# CLI dependencies  
 clap = { version = "4.0", features = ["derive"] }
 
-# Utilities
-uuid = { version = "1.0", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-dirs = "5.0"
-anyhow = "1.0"
-thiserror = "1.0"
-tracing = "0.1"
-tracing-subscriber = "0.3"
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
 
-# iOS/Android compatibility
-hex = "0.4"
-rand = "0.8"
-fastrand = "2.0"
-
-# Optional features
-tokio-stream = "0.1"
-lz4 = "1.24"
+[profile.dev]
+opt-level = 0
+debug = true

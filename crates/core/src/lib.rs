@@ -14,7 +14,6 @@ pub mod storage;
 pub mod protocol;
 pub mod commands;
 pub mod encryption;
-pub mod constants;
 pub mod message;
 pub mod peer;
 pub mod channel;
