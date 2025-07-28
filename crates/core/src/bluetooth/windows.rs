@@ -1,341 +1,287 @@
 ﻿// ==============================================================================
-// crates/core/src/bluetooth/windows.rs
-// Fixed Windows Bluetooth implementation with BitChat compatibility
+// crates/core/src/bluetooth/windows.rs - FIXED FOR iOS COMPATIBILITY
 // ==============================================================================
 
-//! Windows-specific Bluetooth implementation using WinRT APIs
+//! Windows-specific Bluetooth LE implementation with iOS BitChat compatibility
 //! 
-//! This implementation provides real Bluetooth LE functionality on Windows
-//! using the Windows Runtime (WinRT) APIs for device discovery, advertising,
-//! and GATT communication.
+//! This module provides native Windows WinRT BLE support that properly advertises
+//! in the format expected by iOS BitChat clients. Includes fallback strategies
+//! for Windows systems that have advertising restrictions.
 
-use crate::bluetooth::{BluetoothConfig, DiscoveredDevice};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 #[cfg(windows)]
-use windows::{
-    core::*,
-    Devices::Bluetooth::{
-        BluetoothAdapter,
-        Advertisement::{
-            BluetoothLEAdvertisementPublisher,
-            BluetoothLEAdvertisementWatcher,
-            BluetoothLEAdvertisementReceivedEventArgs,
-            BluetoothLEAdvertisementPublisherStatus,
-            BluetoothLEAdvertisementPublisherStatusChangedEventArgs,
-            BluetoothLEScanningMode,
+use {
+    windows::{
+        core::HSTRING,
+        Devices::Bluetooth::{
+            Advertisement::{
+                BluetoothLEAdvertisement,
+                BluetoothLEAdvertisementPublisher,
+                BluetoothLEAdvertisementReceivedEventArgs,
+                BluetoothLEAdvertisementWatcher,
+                BluetoothLEManufacturerData,
+                BluetoothLEScanningMode,
+            },
+            BluetoothAdapter,
         },
+        Storage::Streams::{DataReader, DataWriter},
+        Foundation::TypedEventHandler,
     },
-    Foundation::TypedEventHandler,
-    Storage::Streams::DataReader,
 };
 
-// FIXED: Import from correct location
-use crate::bluetooth::constants::BITCHAT_SERVICE;
+use crate::bluetooth::constants::{
+    BITCHAT_SERVICE, BITCHAT_COMPANY_ID, messaging::MAX_MESSAGE_SIZE,
+};
 
-// Add hex crate import
-use hex;
+/// Discovered device information
+#[derive(Clone, Debug)]
+pub struct DiscoveredDevice {
+    pub device_id: String,
+    pub peer_id: String,
+    pub rssi: i8,
+    pub last_seen: Instant,
+    pub nickname: Option<String>,
+}
 
-/// Windows Bluetooth adapter using WinRT APIs
+/// Windows Bluetooth adapter with iOS compatibility focus
 pub struct WindowsBluetoothAdapter {
-    config: BluetoothConfig,
-    my_peer_id: String,
+    pub my_peer_id: String,
+    pub is_scanning: Arc<RwLock<bool>>,
+    pub is_advertising: Arc<RwLock<bool>>,
+    pub discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
     
-    // State tracking
-    discovered_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
-    
-    // WinRT components (Windows only)
     #[cfg(windows)]
-    publisher: Option<BluetoothLEAdvertisementPublisher>,
+    pub watcher: Option<BluetoothLEAdvertisementWatcher>,
     #[cfg(windows)]
-    watcher: Option<BluetoothLEAdvertisementWatcher>,
-    
-    // Runtime state
-    is_scanning: Arc<RwLock<bool>>,
-    is_advertising: Arc<RwLock<bool>>,
+    pub publisher: Option<BluetoothLEAdvertisementPublisher>,
 }
 
 impl WindowsBluetoothAdapter {
     /// Create new Windows Bluetooth adapter
-    pub async fn new(config: BluetoothConfig) -> Result<Self> {
-        info!("Initializing Windows Bluetooth adapter with WinRT...");
-        
-        let my_peer_id = config.device_name.clone();
-        
-        #[cfg(windows)]
-        {
-            // Verify Bluetooth LE support on Windows
-            Self::check_bluetooth_support().await?;
-        }
-        
-        let adapter = Self {
-            config,
-            my_peer_id,
+    pub fn new(peer_id: String) -> Self {
+        // Ensure peer ID is exactly 16 hex chars (iOS format)
+        let formatted_peer_id = if peer_id.len() == 16 && peer_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            peer_id.to_uppercase()
+        } else if peer_id.len() == 8 && peer_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Pad 8-char ID to 16 chars
+            format!("{:0<16}", peer_id.to_uppercase())
+        } else {
+            // Generate new 16-char peer ID
+            format!("{:016X}", rand::random::<u64>())
+        };
+
+        info!("🆔 Windows adapter initialized with iOS-compatible peer ID: {}", formatted_peer_id);
+
+        Self {
+            my_peer_id: formatted_peer_id,
+            is_scanning: Arc::new(RwLock::new(false)),
+            is_advertising: Arc::new(RwLock::new(false)),
             discovered_devices: Arc::new(RwLock::new(HashMap::new())),
             
             #[cfg(windows)]
-            publisher: None,
-            #[cfg(windows)]
             watcher: None,
-            
-            is_scanning: Arc::new(RwLock::new(false)),
-            is_advertising: Arc::new(RwLock::new(false)),
-        };
-        
-        info!("Windows Bluetooth adapter initialized successfully");
-        Ok(adapter)
-    }
-    
-    /// Check if Bluetooth LE is supported (Windows only)
-    #[cfg(windows)]
-    async fn check_bluetooth_support() -> Result<()> {
-        match BluetoothAdapter::GetDefaultAsync() {
-            Ok(future) => {
-                match future.await {
-                    Ok(adapter) => {
-                        let supported = adapter.IsLowEnergySupported()?;
-                        if supported {
-                            info!("Bluetooth LE is supported and available");
-                            Ok(())
-                        } else {
-                            Err(anyhow!("Bluetooth LE not supported on this system"))
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to get Bluetooth adapter: {:?}", e);
-                        Err(anyhow!("Failed to access Bluetooth adapter"))
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to access Bluetooth API: {:?}", e);
-                Err(anyhow!("Bluetooth API not available"))
-            }
+            #[cfg(windows)]
+            publisher: None,
         }
     }
-    
-    #[cfg(not(windows))]
-    async fn check_bluetooth_support() -> Result<()> {
-        Err(anyhow!("Windows Bluetooth adapter only available on Windows"))
-    }
-    
-    /// Start scanning for BitChat devices
-    pub async fn start_scanning(&mut self) -> Result<()> {
-        info!("Starting BitChat-compatible device scanning...");
-        
-        if *self.is_scanning.read().await {
-            warn!("Already scanning");
-            return Ok(());
-        }
-        
-        #[cfg(windows)]
-        {
-            // Create watcher
-            let watcher = BluetoothLEAdvertisementWatcher::new()?;
-            
-            // Configure scanning parameters for optimal BitChat discovery
-            watcher.SetScanningMode(BluetoothLEScanningMode::Active)?;
-            
-            // Set up event handler for received advertisements
-            let discovered_devices = Arc::clone(&self.discovered_devices);
-            let my_peer_id = self.my_peer_id.clone();
-            
-            let handler = TypedEventHandler::new(
-                move |_sender: &Option<BluetoothLEAdvertisementWatcher>, 
-                      args: &Option<BluetoothLEAdvertisementReceivedEventArgs>| {
-                    let discovered_devices = discovered_devices.clone();
-                    let my_peer_id = my_peer_id.clone();
-                    
-                    if let Some(args) = args {
-                        let args_clone = args.clone();
-                        // FIXED: Use Handle::current() to spawn from non-async context
-                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                            handle.spawn(async move {
-                                if let Err(e) = WindowsBluetoothAdapter::handle_bitchat_advertisement(
-                                    &args_clone, &discovered_devices, &my_peer_id
-                                ).await {
-                                    debug!("Error handling advertisement: {}", e);
-                                }
-                            });
-                        } else {
-                            debug!("No Tokio runtime available for handling advertisement");
-                        }
-                    }
-                    Ok(())
-                }
-            );
-            
-            watcher.Received(&handler)?;
-            watcher.Start()?;
-            self.watcher = Some(watcher);
-            
-            *self.is_scanning.write().await = true;
-            info!("🔍 BitChat device scanning active - looking for iOS/macOS peers");
-        }
-        
-        #[cfg(not(windows))]
-        {
-            return Err(anyhow!("WinRT scanning only available on Windows"));
-        }
-        
-        Ok(())
-    }
-    
-    /// Stop scanning
-    pub async fn stop_scanning(&mut self) -> Result<()> {
-        info!("Stopping Bluetooth LE scanning...");
-        
-        #[cfg(windows)]
-        {
-            if let Some(watcher) = &self.watcher {
-                watcher.Stop()?;
-            }
-            self.watcher = None;
-        }
-        
-        *self.is_scanning.write().await = false;
-        info!("Bluetooth LE scanning stopped");
-        
-        Ok(())
-    }
-    
-    /// Start advertising as BitChat device with iOS/macOS compatibility
+
+    /// Start advertising with iOS compatibility (multiple strategies)
     pub async fn start_advertising(&mut self, _advertisement_data: &[u8]) -> Result<()> {
-        info!("Starting BitChat-compatible Bluetooth LE advertising...");
-    
+        info!("🚀 Starting iOS-compatible BitChat advertising on Windows...");
+
         if *self.is_advertising.read().await {
             warn!("Already advertising");
             return Ok(());
         }
-    
+
         #[cfg(windows)]
         {
-            let publisher = BluetoothLEAdvertisementPublisher::new()?;
-            let advertisement = publisher.Advertisement()?;
-        
-            // FIXED: Use iOS/macOS compatible format - just the peer ID (no BC_ prefix)
-            let device_name = self.my_peer_id.clone();
-            advertisement.SetLocalName(&HSTRING::from(&device_name))?;
-            info!("📱 Advertising with iOS/macOS compatible name: {}", device_name);
-            
-            let mut success = false;
-            
-            // Try with just device name first (iOS/macOS compatible)
-            match publisher.Start() {
+            // STRATEGY 1: iOS-compatible device name only (preferred)
+            match self.try_ios_compatible_advertising().await {
                 Ok(_) => {
-                    success = true;
-                    self.publisher = Some(publisher);
-                    *self.is_advertising.write().await = true;
-                    info!("🔵 ✅ iOS/macOS COMPATIBLE advertising SUCCESS!");
-                    info!("📱 Device name: {} (BitChat discoverable by iOS/macOS)", device_name);
+                    info!("✅ SUCCESS: iOS-compatible advertising active!");
+                    info!("📱 Device name: {} (discoverable by iOS BitChat)", self.my_peer_id);
+                    return Ok(());
                 }
                 Err(e) => {
-                    warn!("iOS/macOS format advertising failed: {}, trying manufacturer data", e);
-                    
-                    // STRATEGY 2: Try with manufacturer data (fallback)
-                    let publisher2 = BluetoothLEAdvertisementPublisher::new()?;
-                    let advertisement2 = publisher2.Advertisement()?;
-                    
-                    // Set device name again
-                    advertisement2.SetLocalName(&HSTRING::from(&device_name))?;
-                    
-                    // Add minimal manufacturer data
-                    match advertisement2.ManufacturerData() {
-                        Ok(mfg_data_list) => {
-                            let mfg_data = windows::Devices::Bluetooth::Advertisement::BluetoothLEManufacturerData::new()?;
-                            mfg_data.SetCompanyId(0xFFFF)?; // Unassigned company ID for BitChat
-                            
-                            // Add peer ID as manufacturer data
-                            if let Ok(peer_id_bytes) = hex::decode(&self.my_peer_id) {
-                                let data_writer = windows::Storage::Streams::DataWriter::new()?;
-                                data_writer.WriteBytes(&peer_id_bytes)?;
-                                mfg_data.SetData(&data_writer.DetachBuffer()?)?;
-                                mfg_data_list.Append(&mfg_data)?;
-                            }
-                            
-                            match publisher2.Start() {
-                                Ok(_) => {
-                                    success = true;
-                                    self.publisher = Some(publisher2);
-                                    *self.is_advertising.write().await = true;
-                                    info!("🔵 ✅ MANUFACTURER-DATA advertising SUCCESS!");
-                                    info!("📱 Broadcasting BitChat signature with peer ID");
-                                }
-                                Err(e) => {
-                                    warn!("Manufacturer data advertising also failed: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Cannot access manufacturer data: {}", e);
-                        }
-                    }
+                    warn!("iOS-compatible advertising failed: {}", e);
                 }
             }
-            
-            if !success {
-                // STRATEGY 3: Last resort - try with service UUID only
-                warn!("Trying last resort: BitChat service UUID only");
-                let publisher3 = BluetoothLEAdvertisementPublisher::new()?;
-                let advertisement3 = publisher3.Advertisement()?;
-                
-                // Try with BitChat service UUID
-                match advertisement3.ServiceUuids() {
-                    Ok(service_uuids) => {
-                        if let Ok(bitchat_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
-                            match service_uuids.Append(bitchat_guid) {
-                                Ok(_) => {
-                                    match publisher3.Start() {
-                                        Ok(_) => {
-                                            success = true;
-                                            self.publisher = Some(publisher3);
-                                            *self.is_advertising.write().await = true;
-                                            info!("🔵 ✅ BITCHAT-UUID advertising SUCCESS!");
-                                            info!("📱 Broadcasting with BitChat service UUID");
-                                        }
-                                        Err(e) => {
-                                            warn!("❌ BitChat UUID advertising failed: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("Cannot add BitChat UUID: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Cannot access service UUIDs: {}", e);
-                    }
+
+            // STRATEGY 2: Enhanced advertising with service UUID
+            match self.try_enhanced_advertising().await {
+                Ok(_) => {
+                    info!("✅ SUCCESS: Enhanced advertising active!");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Enhanced advertising failed: {}", e);
                 }
             }
-            
-            if !success {
-                warn!("❌ All advertising strategies failed on this Windows/hardware combination");
-                warn!("💡 Your system can scan and discover other BitChat devices perfectly");
-                warn!("💡 Consider using a mobile device or different Windows machine for advertising");
-            } else {
-                info!("📱 SUCCESS: Other BitChat devices should now be able to discover you!");
-                info!("🔍 You can also discover other BitChat devices via scanning");
+
+            // STRATEGY 3: Manufacturer data approach
+            match self.try_manufacturer_data_advertising().await {
+                Ok(_) => {
+                    info!("✅ SUCCESS: Manufacturer data advertising active!");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Manufacturer data advertising failed: {}", e);
+                }
             }
+
+            // STRATEGY 4: Minimal advertising (last resort)
+            match self.try_minimal_advertising().await {
+                Ok(_) => {
+                    info!("⚠️  PARTIAL SUCCESS: Minimal advertising active");
+                    info!("   May not be discoverable by all iOS devices");
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("All advertising strategies failed: {}", e);
+                }
+            }
+
+            // If all strategies fail, provide detailed diagnostics
+            self.log_advertising_diagnostics().await;
+            return Err(anyhow!("Windows BLE advertising not supported on this system"));
         }
-    
+
         #[cfg(not(windows))]
         {
             return Err(anyhow!("WinRT advertising only available on Windows"));
         }
-    
+    }
+
+    /// STRATEGY 1: Pure iOS-compatible advertising (device name only)
+    #[cfg(windows)]
+    async fn try_ios_compatible_advertising(&mut self) -> Result<()> {
+        let publisher = BluetoothLEAdvertisementPublisher::new()?;
+        let advertisement = publisher.Advertisement()?;
+
+        // Set device name to pure peer ID (iOS format)
+        advertisement.SetLocalName(&HSTRING::from(&self.my_peer_id))?;
+        
+        // Minimal advertisement flags
+        let flags = vec![0x06u8]; // LE General Discoverable + BR/EDR Not Supported
+        let data_writer = DataWriter::new()?;
+        data_writer.WriteBytes(&flags)?;
+        
+        publisher.Start()?;
+        self.publisher = Some(publisher);
+        *self.is_advertising.write().await = true;
+        
+        info!("📱 iOS-compatible advertising started (device name: {})", self.my_peer_id);
         Ok(())
     }
-    
+
+    /// STRATEGY 2: Enhanced advertising with BitChat service UUID
+    #[cfg(windows)]
+    async fn try_enhanced_advertising(&mut self) -> Result<()> {
+        let publisher = BluetoothLEAdvertisementPublisher::new()?;
+        let advertisement = publisher.Advertisement()?;
+
+        // Set iOS-compatible device name
+        advertisement.SetLocalName(&HSTRING::from(&self.my_peer_id))?;
+
+        // Add BitChat service UUID
+        if let Ok(service_uuids) = advertisement.ServiceUuids() {
+            if let Ok(bitchat_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
+                service_uuids.Append(&bitchat_guid)?;
+                info!("Added BitChat service UUID to advertisement");
+            }
+        }
+
+        publisher.Start()?;
+        self.publisher = Some(publisher);
+        *self.is_advertising.write().await = true;
+        
+        info!("🔧 Enhanced advertising started with service UUID");
+        Ok(())
+    }
+
+    /// STRATEGY 3: Manufacturer data advertising
+    #[cfg(windows)]
+    async fn try_manufacturer_data_advertising(&mut self) -> Result<()> {
+        let publisher = BluetoothLEAdvertisementPublisher::new()?;
+        let advertisement = publisher.Advertisement()?;
+
+        // Set iOS-compatible device name
+        advertisement.SetLocalName(&HSTRING::from(&self.my_peer_id))?;
+
+        // Add manufacturer data with peer ID
+        if let Ok(mfg_data_list) = advertisement.ManufacturerData() {
+            let mfg_data = BluetoothLEManufacturerData::new()?;
+            mfg_data.SetCompanyId(BITCHAT_COMPANY_ID)?;
+            
+            // Encode peer ID in manufacturer data
+            let data_writer = DataWriter::new()?;
+            data_writer.WriteBytes(&[0xBC, 0x01])?; // BitChat v1 signature
+            
+            if let Ok(peer_id_bytes) = hex::decode(&self.my_peer_id) {
+                data_writer.WriteBytes(&peer_id_bytes)?;
+            }
+            
+            mfg_data.SetData(&data_writer.DetachBuffer()?)?;
+            mfg_data_list.Append(&mfg_data)?;
+        }
+
+        publisher.Start()?;
+        self.publisher = Some(publisher);
+        *self.is_advertising.write().await = true;
+        
+        info!("🏭 Manufacturer data advertising started");
+        Ok(())
+    }
+
+    /// STRATEGY 4: Minimal advertising (fallback)
+    #[cfg(windows)]
+    async fn try_minimal_advertising(&mut self) -> Result<()> {
+        let publisher = BluetoothLEAdvertisementPublisher::new()?;
+        
+        // Don't add anything extra, just start basic advertising
+        publisher.Start()?;
+        self.publisher = Some(publisher);
+        *self.is_advertising.write().await = true;
+        
+        warn!("⚠️  Using minimal advertising - may not be BitChat discoverable");
+        Ok(())
+    }
+
+    /// Convert UUID string to Windows GUID
+    #[cfg(windows)]
+    fn uuid_to_guid(uuid_str: &str) -> Result<windows::core::GUID> {
+        // Remove dashes and convert to bytes
+        let uuid_clean = uuid_str.replace('-', "");
+        if uuid_clean.len() != 32 {
+            return Err(anyhow!("Invalid UUID format"));
+        }
+
+        let uuid_bytes = hex::decode(uuid_clean)?;
+        if uuid_bytes.len() != 16 {
+            return Err(anyhow!("Invalid UUID byte length"));
+        }
+
+        Ok(windows::core::GUID::from_values(
+            u32::from_be_bytes([uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3]]),
+            u16::from_be_bytes([uuid_bytes[4], uuid_bytes[5]]),
+            u16::from_be_bytes([uuid_bytes[6], uuid_bytes[7]]),
+            [
+                uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
+                uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
+            ]
+        ))
+    }
+
     /// Stop advertising
     pub async fn stop_advertising(&mut self) -> Result<()> {
-        info!("Stopping Bluetooth LE advertising...");
+        info!("⏹️  Stopping Bluetooth LE advertising...");
         
         #[cfg(windows)]
         {
@@ -350,10 +296,60 @@ impl WindowsBluetoothAdapter {
         
         Ok(())
     }
-    
-    /// Enhanced advertisement handler for BitChat compatibility
+
+    /// Start scanning for BitChat devices
+    pub async fn start_scanning(&mut self) -> Result<()> {
+        info!("🔍 Starting enhanced BitChat device scanning...");
+        
+        if *self.is_scanning.read().await {
+            warn!("Already scanning");
+            return Ok(());
+        }
+
+        #[cfg(windows)]
+        {
+            let watcher = BluetoothLEAdvertisementWatcher::new()?;
+            
+            // Configure for optimal discovery
+            watcher.SetScanningMode(BluetoothLEScanningMode::Active)?;
+            
+            // Set up event handler for discovered devices
+            let discovered_devices = Arc::clone(&self.discovered_devices);
+            let my_peer_id = self.my_peer_id.clone();
+            
+            let handler = TypedEventHandler::new(move |_sender, args: &Option<BluetoothLEAdvertisementReceivedEventArgs>| {
+                if let Some(args) = args {
+                    let discovered_devices_clone = Arc::clone(&discovered_devices);
+                    let my_peer_id_clone = my_peer_id.clone();
+                    
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_discovered_device(args, &discovered_devices_clone, &my_peer_id_clone).await {
+                            debug!("Error handling discovered device: {}", e);
+                        }
+                    });
+                }
+                Ok(())
+            });
+            
+            watcher.Received(&handler)?;
+            watcher.Start()?;
+            
+            self.watcher = Some(watcher);
+            *self.is_scanning.write().await = true;
+            info!("✅ BitChat scanning active");
+        }
+        
+        #[cfg(not(windows))]
+        {
+            return Err(anyhow!("WinRT scanning only available on Windows"));
+        }
+        
+        Ok(())
+    }
+
+    /// Enhanced advertisement handler for maximum BitChat compatibility
     #[cfg(windows)]
-    async fn handle_bitchat_advertisement(
+    async fn handle_discovered_device(
         args: &BluetoothLEAdvertisementReceivedEventArgs,
         discovered_devices: &Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
         my_peer_id: &str,
@@ -365,50 +361,33 @@ impl WindowsBluetoothAdapter {
         
         let mut is_bitchat_device = false;
         let mut peer_id: Option<String> = None;
-        let nickname: Option<String> = None;
+        let mut nickname: Option<String> = None;
         
-        // Method 1: Check for BitChat service UUID
-        if let Ok(service_uuids) = advertisement.ServiceUuids() {
-            if let Ok(bitchat_service_guid) = WindowsBluetoothAdapter::uuid_to_guid(&BITCHAT_SERVICE.to_string()) {
-                for i in 0..service_uuids.Size().unwrap_or(0) {
-                    if let Ok(service_uuid) = service_uuids.GetAt(i) {
-                        if service_uuid == bitchat_service_guid {
-                            is_bitchat_device = true;
-                            debug!("Found BitChat service UUID in advertisement!");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Method 2: Check device name for BitChat format - FIXED FOR iOS/macOS COMPATIBILITY
+        // METHOD 1: Check device name for BitChat patterns (prioritize iOS format)
         if let Ok(local_name) = advertisement.LocalName() {
             let name = local_name.to_string();
             
-            // PRIORITY: iOS/macOS format - just peer ID (16 hex chars)
+            // PRIORITY: iOS/macOS format - exactly 16 hex characters
             if name.len() == 16 && name.chars().all(|c| c.is_ascii_hexdigit()) {
                 is_bitchat_device = true;
                 peer_id = Some(name.to_uppercase());
-                debug!("Found iOS/macOS BitChat device by name: {}", name);
+                debug!("🍎 Found iOS/macOS BitChat device: {}", name);
             }
-            // COMPATIBILITY: Windows format - BC_<peer_id> (for backward compatibility)
+            // COMPATIBILITY: Windows legacy format
             else if name.starts_with("BC_") && name.len() >= 11 {
                 let extracted_peer_id = name.chars().skip(3).collect::<String>();
-                // Accept any length >= 8 hex chars for compatibility
                 if extracted_peer_id.len() >= 8 && extracted_peer_id.chars().all(|c| c.is_ascii_hexdigit()) {
                     is_bitchat_device = true;
-                    // Take first 16 chars if longer, pad if shorter
                     let normalized_peer_id = if extracted_peer_id.len() >= 16 {
                         extracted_peer_id.chars().take(16).collect::<String>()
                     } else {
-                        format!("{:0<16}", extracted_peer_id) // Pad with zeros if needed
+                        format!("{:0<16}", extracted_peer_id)
                     };
                     peer_id = Some(normalized_peer_id.to_uppercase());
-                    debug!("Found Windows BitChat device by name: {} -> {}", name, peer_id.as_ref().unwrap());
+                    debug!("🪟 Found Windows BitChat device: {} -> {}", name, peer_id.as_ref().unwrap());
                 }
             }
-            // COMPATIBILITY: Pi format - Pi_<peer_id> or similar
+            // COMPATIBILITY: Raspberry Pi or other formats
             else if name.contains("_") {
                 if let Some(extracted_peer_id) = name.split('_').last() {
                     if extracted_peer_id.len() >= 8 && extracted_peer_id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -419,485 +398,141 @@ impl WindowsBluetoothAdapter {
                             format!("{:0<16}", extracted_peer_id)
                         };
                         peer_id = Some(normalized_peer_id.to_uppercase());
-                        debug!("Found Pi BitChat device by name: {} -> {}", name, peer_id.as_ref().unwrap());
+                        debug!("🥧 Found Pi BitChat device: {} -> {}", name, peer_id.as_ref().unwrap());
                     }
                 }
             }
         }
-        
-        // Method 3: Check manufacturer data for BitChat protocol
+
+        // METHOD 2: Check for BitChat service UUID
+        if let Ok(service_uuids) = advertisement.ServiceUuids() {
+            if let Ok(bitchat_service_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
+                for i in 0..service_uuids.Size().unwrap_or(0) {
+                    if let Ok(service_uuid) = service_uuids.GetAt(i) {
+                        if service_uuid == bitchat_service_guid {
+                            is_bitchat_device = true;
+                            debug!("🔵 Found BitChat service UUID in advertisement!");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // METHOD 3: Check manufacturer data for BitChat signature
         if let Ok(manufacturer_data_list) = advertisement.ManufacturerData() {
             for i in 0..manufacturer_data_list.Size().unwrap_or(0) {
                 if let Ok(manufacturer_data) = manufacturer_data_list.GetAt(i) {
-                    if manufacturer_data.CompanyId().unwrap_or(0) == 0xFFFF { // BitChat company ID
+                    if manufacturer_data.CompanyId().unwrap_or(0) == BITCHAT_COMPANY_ID {
                         if let Ok(data_buffer) = manufacturer_data.Data() {
-                            // Read the buffer properly using DataReader
                             if let Ok(data_reader) = DataReader::FromBuffer(&data_buffer) {
                                 let buffer_length = data_buffer.Length().unwrap_or(0) as usize;
-                        
-                                if buffer_length >= 8 {
-                                    // Read peer ID bytes (first 8 bytes)
-                                    let mut peer_id_bytes = vec![0u8; 8];
-                                    if data_reader.ReadBytes(&mut peer_id_bytes[..]).is_ok() {
-                                        let extracted_peer_id = hex::encode(&peer_id_bytes).to_uppercase();
+                                
+                                if buffer_length >= 10 { // 2 bytes signature + 8 bytes peer ID minimum
+                                    let mut signature_bytes = vec![0u8; 2];
+                                    data_reader.ReadBytes(&mut signature_bytes)?;
+                                    
+                                    if signature_bytes == [0xBC, 0x01] { // BitChat v1 signature
                                         is_bitchat_device = true;
-                                        peer_id = Some(extracted_peer_id);
-                                        debug!("Found BitChat device by manufacturer data");
+                                        
+                                        // Read peer ID if not already found
+                                        if peer_id.is_none() && buffer_length >= 10 {
+                                            let mut peer_id_bytes = vec![0u8; 8];
+                                            data_reader.ReadBytes(&mut peer_id_bytes)?;
+                                            peer_id = Some(hex::encode(peer_id_bytes).to_uppercase());
+                                        }
+                                        
+                                        debug!("🏭 Found BitChat manufacturer data signature!");
                                     }
                                 }
                             }
                         }
-                        break;
                     }
                 }
             }
         }
-        
-        // Process discovered BitChat device
+
+        // Only process if it's a BitChat device and not ourselves
         if is_bitchat_device {
-            let final_peer_id = peer_id.unwrap_or_else(|| device_id.clone());
-            
-            // Don't discover ourselves
-            if final_peer_id == my_peer_id {
-                return Ok(());
-            }
-            
-            let device = DiscoveredDevice {
-                device_id: device_id.clone(),
-                peer_id: Some(final_peer_id.clone()),  // This is Option<String>
-                rssi: rssi as i16,                     // Convert to i16
-                last_seen: Instant::now(),
-                connection_attempts: 0,
-            };
-            
-            let mut devices = discovered_devices.write().await;
-            let is_new = !devices.contains_key(&final_peer_id);
-            devices.insert(final_peer_id.clone(), device);
-            
-            let nickname_str = nickname.as_deref().unwrap_or("Unknown");
-            if is_new {
-                info!("🔍 NEW BitChat peer discovered: {} ({}) - RSSI: {} dBm", 
-                      final_peer_id, nickname_str, rssi);
-            } else {
-                debug!("Updated BitChat device: {} - RSSI: {} dBm", final_peer_id, rssi);
+            if let Some(found_peer_id) = peer_id {
+                if found_peer_id != my_peer_id {
+                    let discovered_device = DiscoveredDevice {
+                        device_id: device_id.clone(),
+                        peer_id: found_peer_id.clone(),
+                        rssi,
+                        last_seen: Instant::now(),
+                        nickname,
+                    };
+                    
+                    let mut devices = discovered_devices.write().await;
+                    devices.insert(device_id.clone(), discovered_device);
+                    drop(devices);
+                    
+                    info!("🎯 Discovered BitChat peer: {} (RSSI: {} dBm)", found_peer_id, rssi);
+                } else {
+                    debug!("Ignoring our own advertisement");
+                }
             }
         }
+
+        Ok(())
+    }
+
+    /// Stop scanning
+    pub async fn stop_scanning(&mut self) -> Result<()> {
+        info!("⏹️  Stopping Bluetooth LE scanning...");
+        
+        #[cfg(windows)]
+        {
+            if let Some(watcher) = &self.watcher {
+                watcher.Stop()?;
+            }
+            self.watcher = None;
+        }
+        
+        *self.is_scanning.write().await = false;
+        info!("Bluetooth LE scanning stopped");
         
         Ok(())
     }
-    
-    /// Convert UUID string to Windows GUID
+
+    /// Log detailed advertising diagnostics
     #[cfg(windows)]
-    fn uuid_to_guid(uuid_str: &str) -> Result<windows::core::GUID> {
-        // Remove hyphens from UUID string
-        let uuid_clean = uuid_str.replace("-", "");
-        
-        if uuid_clean.len() != 32 {
-            return Err(anyhow!("Invalid UUID length: {}", uuid_str));
-        }
-        
-        // Parse UUID components
-        let data1 = u32::from_str_radix(&uuid_clean[0..8], 16)
-            .map_err(|e| anyhow!("Failed to parse UUID data1: {}", e))?;
-        let data2 = u16::from_str_radix(&uuid_clean[8..12], 16)
-            .map_err(|e| anyhow!("Failed to parse UUID data2: {}", e))?;
-        let data3 = u16::from_str_radix(&uuid_clean[12..16], 16)
-            .map_err(|e| anyhow!("Failed to parse UUID data3: {}", e))?;
-        
-        let mut data4 = [0u8; 8];
-        for i in 0..8 {
-            data4[i] = u8::from_str_radix(&uuid_clean[16 + i * 2..18 + i * 2], 16)
-                .map_err(|e| anyhow!("Failed to parse UUID data4[{}]: {}", i, e))?;
-        }
-        
-        Ok(windows::core::GUID::from_values(data1, data2, data3, data4))
+    async fn log_advertising_diagnostics(&self) {
+        error!("🚨 WINDOWS BLUETOOTH ADVERTISING DIAGNOSTICS:");
+        error!("   Current peer ID: {}", self.my_peer_id);
+        error!("   Expected iOS format: 16 hex characters (✅ correct format)");
+        error!("");
+        error!("   💡 POSSIBLE SOLUTIONS:");
+        error!("   1. Run as Administrator");
+        error!("   2. Update Windows and Bluetooth drivers");
+        error!("   3. Enable 'Allow Bluetooth devices to find this PC' in Windows Settings");
+        error!("   4. Try a different Bluetooth adapter (USB dongles often work better)");
+        error!("   5. Use a Raspberry Pi for reliable advertising");
+        error!("");
+        error!("   📱 iOS DISCOVERY TROUBLESHOOTING:");
+        error!("   - Your device name should appear as: '{}'", self.my_peer_id);
+        error!("   - iOS BitChat should detect this automatically");
+        error!("   - If not working, the issue is Windows BLE driver limitations");
     }
-    
+
     /// Get discovered devices
     pub async fn get_discovered_devices(&self) -> HashMap<String, DiscoveredDevice> {
         self.discovered_devices.read().await.clone()
     }
-    
-    /// Get connection status
-    pub async fn is_scanning(&self) -> bool {
-        *self.is_scanning.read().await
-    }
-    
-    /// Get advertising status
+
+    /// Check if advertising
     pub async fn is_advertising(&self) -> bool {
         *self.is_advertising.read().await
     }
-    
-    /// Check if Bluetooth is available on this system
-    pub async fn is_available(&self) -> bool {
-        #[cfg(windows)]
-        {
-            // Check if we can access the Bluetooth adapter
-            match BluetoothAdapter::GetDefaultAsync() {
-                Ok(future) => {
-                    match future.await {
-                        Ok(adapter) => adapter.IsLowEnergySupported().unwrap_or(false),
-                        Err(_) => false,
-                    }
-                }
-                Err(_) => false,
-            }
-        }
-        
-        #[cfg(not(windows))]
-        {
-            false
-        }
-    }
-    
-    /// Get platform-specific debug information
-    pub async fn get_platform_debug_info(&self) -> String {
-        let mut info = String::new();
-        info.push_str("=== Windows Bluetooth Adapter Debug Info ===\n");
-        
-        #[cfg(windows)]
-        {
-            // Bluetooth adapter info
-            match BluetoothAdapter::GetDefaultAsync() {
-                Ok(future) => {
-                    match future.await {
-                        Ok(adapter) => {
-                            info.push_str(&format!("Bluetooth LE Supported: {}\n", 
-                                adapter.IsLowEnergySupported().unwrap_or(false)));
-                            
-                            if let Ok(device_id) = adapter.DeviceId() {
-                                info.push_str(&format!("Device ID: {}\n", device_id.to_string()));
-                            }
-                        }
-                        Err(e) => {
-                            info.push_str(&format!("Failed to get adapter: {}\n", e));
-                        }
-                    }
-                }
-                Err(e) => {
-                    info.push_str(&format!("Failed to access Bluetooth API: {}\n", e));
-                }
-            }
-            
-            // Current state
-            info.push_str(&format!("Currently Scanning: {}\n", self.is_scanning().await));
-            info.push_str(&format!("Currently Advertising: {}\n", self.is_advertising().await));
-            info.push_str(&format!("My Peer ID: {}\n", self.my_peer_id));
-            
-            // Discovered devices
-            let devices = self.discovered_devices.read().await;
-            info.push_str(&format!("Discovered Devices: {}\n", devices.len()));
-            for (device_id, device) in devices.iter() {
-                info.push_str(&format!("  - {} (RSSI: {} dBm, Peer: {:?})\n", 
-                    device_id, device.rssi, device.peer_id));
-            }
-        }
-        
-        #[cfg(not(windows))]
-        {
-            info.push_str("Windows Bluetooth adapter not available on this platform\n");
-        }
-        
-        info
-    }
-    
-    /// Shutdown the adapter
-    pub async fn shutdown(&mut self) -> Result<()> {
-        info!("Shutting down Windows Bluetooth adapter...");
-        
-        self.stop_scanning().await?;
-        self.stop_advertising().await?;
-        
-        info!("Windows Bluetooth adapter shutdown complete");
-        Ok(())
+
+    /// Check if scanning
+    pub async fn is_scanning(&self) -> bool {
+        *self.is_scanning.read().await
     }
 
-    /// Comprehensive diagnostic check for Bluetooth LE advertising capabilities
-    pub async fn diagnose_advertising_support(&self) -> String {
-        let mut report = String::new();
-        report.push_str("=== Windows Bluetooth LE Advertising Diagnostics ===\n\n");
-
-        #[cfg(windows)]
-        {
-            // 1. Check Windows Version
-            report.push_str("1. WINDOWS VERSION CHECK:\n");
-            match self.check_windows_version() {
-                Ok(version_info) => report.push_str(&format!("   ✅ {}\n", version_info)),
-                Err(e) => report.push_str(&format!("   ❌ Failed to get Windows version: {}\n", e)),
-            }
-            report.push('\n');
-
-            // 2. Check Bluetooth Adapter
-            report.push_str("2. BLUETOOTH ADAPTER CHECK:\n");
-            match BluetoothAdapter::GetDefaultAsync() {
-                Ok(future) => {
-                    match future.await {
-                        Ok(adapter) => {
-                            // Basic LE support
-                            match adapter.IsLowEnergySupported() {
-                                Ok(supported) => {
-                                    if supported {
-                                        report.push_str("   ✅ Bluetooth LE supported\n");
-                                    } else {
-                                        report.push_str("   ❌ Bluetooth LE NOT supported\n");
-                                        report.push_str("   💡 Your hardware doesn't support Bluetooth LE\n");
-                                    }
-                                }
-                                Err(e) => report.push_str(&format!("   ❌ Failed to check LE support: {}\n", e)),
-                            }
-
-                            // Get adapter info
-                            if let Ok(device_id) = adapter.DeviceId() {
-                                report.push_str(&format!("   📋 Device ID: {}\n", device_id.to_string()));
-                            }
-                        }
-                        Err(e) => {
-                            report.push_str(&format!("   ❌ Failed to get Bluetooth adapter: {}\n", e));
-                            report.push_str("   💡 Make sure Bluetooth is enabled in Windows settings\n");
-                        }
-                    }
-                }
-                Err(e) => {
-                    report.push_str(&format!("   ❌ Failed to access Bluetooth API: {}\n", e));
-                    report.push_str("   💡 Bluetooth may not be available on this system\n");
-                }
-            }
-            report.push('\n');
-
-            // 3. Test Advertising Publisher Creation
-            report.push_str("3. ADVERTISING PUBLISHER TEST:\n");
-            match self.test_publisher_creation().await {
-                Ok(test_results) => report.push_str(&test_results),
-                Err(e) => report.push_str(&format!("   ❌ Publisher test failed: {}\n", e)),
-            }
-            report.push('\n');
-
-            // 4. Check System Permissions
-            report.push_str("4. SYSTEM PERMISSIONS:\n");
-            report.push_str(&self.check_system_permissions());
-            report.push('\n');
-
-            // 5. Power Management Check
-            report.push_str("5. POWER MANAGEMENT:\n");
-            match self.check_power_settings().await {
-                Ok(power_info) => report.push_str(&power_info),
-                Err(e) => report.push_str(&format!("   ⚠️ Cannot check power settings: {}\n", e)),
-            }
-            report.push('\n');
-
-            // 6. Driver Information
-            report.push_str("6. BLUETOOTH DRIVER INFO:\n");
-            report.push_str(&self.get_driver_info());
-            report.push('\n');
-
-            // 7. Recommendations
-            report.push_str("7. RECOMMENDATIONS:\n");
-            report.push_str(&self.generate_recommendations());
-        }
-
-        #[cfg(not(windows))]
-        {
-            report.push_str("This diagnostic is only available on Windows.\n");
-        }
-
-        report
-    }
-
-    #[cfg(windows)]
-    fn check_windows_version(&self) -> Result<String> {
-        // Simplified version check using command line
-        use std::process::Command;
-        
-        match Command::new("cmd")
-            .args(&["/C", "ver"])
-            .output()
-        {
-            Ok(output) => {
-                let version_str = String::from_utf8_lossy(&output.stdout);
-                if version_str.contains("Windows") {
-                    if version_str.contains("10.") || version_str.contains("11.") {
-                        Ok(format!("Windows 10/11 detected (✅ Should support BLE advertising)"))
-                    } else {
-                        Ok(format!("Windows detected (⚠️ May not support reliable BLE advertising)"))
-                    }
-                } else {
-                    Ok("Windows version detected".to_string())
-                }
-            }
-            Err(_) => Ok("Windows version check not available".to_string())
-        }
-    }
-
-    #[cfg(windows)]
-    async fn test_publisher_creation(&self) -> Result<String> {
-        let mut results = String::new();
-        
-        // Test 1: Basic publisher creation
-        match BluetoothLEAdvertisementPublisher::new() {
-            Ok(publisher) => {
-                results.push_str("   ✅ Can create BluetoothLEAdvertisementPublisher\n");
-                
-                // Test 2: Advertisement creation
-                match publisher.Advertisement() {
-                    Ok(advertisement) => {
-                        results.push_str("   ✅ Can create BluetoothLEAdvertisement\n");
-                        
-                        // Test 3: Try setting local name (iOS/macOS compatible format)
-                        match advertisement.SetLocalName(&windows::core::HSTRING::from(&self.my_peer_id)) {
-                            Ok(_) => results.push_str("   ✅ Can set iOS/macOS compatible device name\n"),
-                            Err(e) => results.push_str(&format!("   ❌ Cannot set device name: {}\n", e)),
-                        }
-                        
-                        // Test 4: Try adding BitChat service UUID
-                        match advertisement.ServiceUuids() {
-                            Ok(service_uuids) => {
-                                results.push_str("   ✅ Can access service UUID collection\n");
-                                
-                                // Try to add BitChat service UUID
-                                if let Ok(bitchat_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
-                                    match service_uuids.Append(bitchat_guid) {
-                                        Ok(_) => results.push_str("   ✅ Can add BitChat service UUID\n"),
-                                        Err(e) => results.push_str(&format!("   ❌ Cannot add BitChat service UUID: {}\n", e)),
-                                    }
-                                }
-                            }
-                            Err(e) => results.push_str(&format!("   ❌ Cannot access service UUIDs: {}\n", e)),
-                        }
-                        
-                        // Test 5: Try to start advertising (but stop immediately)
-                        match publisher.Start() {
-                            Ok(_) => {
-                                results.push_str("   ✅ Can start advertising!\n");
-                                // Stop immediately to avoid interference
-                                let _ = publisher.Stop();
-                            }
-                            Err(e) => {
-                                results.push_str(&format!("   ❌ Cannot start advertising: {}\n", e));
-                                results.push_str(&format!("       Error code: 0x{:08X}\n", e.code().0));
-                                
-                                // Decode common error codes
-                                match e.code().0 as u32 {
-                                    0x80070057 => results.push_str("       💡 ERROR_INVALID_PARAMETER - Try simpler advertisement\n"),
-                                    0x80070005 => results.push_str("       💡 ACCESS_DENIED - Try running as administrator\n"),
-                                    0x8007001F => results.push_str("       💡 ERROR_GEN_FAILURE - Bluetooth driver issue\n"),
-                                    0x80070490 => results.push_str("       💡 ELEMENT_NOT_FOUND - Service not available\n"),
-                                    _ => results.push_str("       💡 Unknown error - Check Windows event logs\n"),
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => results.push_str(&format!("   ❌ Cannot create advertisement: {}\n", e)),
-                }
-            }
-            Err(e) => results.push_str(&format!("   ❌ Cannot create publisher: {}\n", e)),
-        }
-        
-        Ok(results)
-    }
-
-    #[cfg(windows)]
-    fn check_system_permissions(&self) -> String {
-        let mut perms = String::new();
-        
-        // Simplified permission check using environment variables
-        use std::env;
-        
-        match env::var("USERNAME") {
-            Ok(username) => {
-                perms.push_str(&format!("   📋 Running as user: {}\n", username));
-                
-                // Simple admin check
-                if username.to_lowercase().contains("admin") || username.to_lowercase().contains("administrator") {
-                    perms.push_str("   ✅ Likely running with elevated privileges\n");
-                } else {
-                    perms.push_str("   ⚠️ May not be running as Administrator\n");
-                    perms.push_str("   💡 Try 'Run as Administrator' if advertising fails\n");
-                }
-            }
-            Err(_) => {
-                perms.push_str("   ⚠️ Cannot determine user context\n");
-            }
-        }
-        
-        // Check Bluetooth privacy settings
-        perms.push_str("   💡 Check Windows Settings > Privacy > Bluetooth for app permissions\n");
-        
-        perms
-    }
-
-    #[cfg(windows)]
-    async fn check_power_settings(&self) -> Result<String> {
-        let mut power_info = String::new();
-        
-        // Simplified power check
-        power_info.push_str("   💡 Power Management Tips:\n");
-        power_info.push_str("      - Disable Battery Saver mode if enabled\n");
-        power_info.push_str("      - Keep laptop plugged in for best Bluetooth performance\n");
-        power_info.push_str("      - Check Device Manager > Bluetooth > Power Management\n");
-        power_info.push_str("      - Uncheck 'Allow computer to turn off this device'\n");
-        
-        Ok(power_info)
-    }
-
-    #[cfg(windows)]
-    fn get_driver_info(&self) -> String {
-        let mut driver_info = String::new();
-        
-        driver_info.push_str("   💡 To check Bluetooth driver info:\n");
-        driver_info.push_str("      1. Open Device Manager (devmgmt.msc)\n");
-        driver_info.push_str("      2. Expand 'Bluetooth' section\n");
-        driver_info.push_str("      3. Right-click your Bluetooth adapter\n");
-        driver_info.push_str("      4. Select 'Properties' > 'Driver' tab\n");
-        driver_info.push_str("      5. Check driver version and date\n");
-        driver_info.push_str("   💡 Update drivers if they're older than 2020\n");
-        
-        driver_info
-    }
-
-    #[cfg(windows)]
-    fn generate_recommendations(&self) -> String {
-        let mut recommendations = String::new();
-        
-        recommendations.push_str("   📋 TO ENABLE iOS/macOS DISCOVERY:\n\n");
-        recommendations.push_str("   1. UPDATE SYSTEM:\n");
-        recommendations.push_str("      - Update to Windows 10/11 latest version\n");
-        recommendations.push_str("      - Update Bluetooth drivers\n");
-        recommendations.push_str("      - Restart after updates\n\n");
-        
-        recommendations.push_str("   2. CHECK BLUETOOTH SETTINGS:\n");
-        recommendations.push_str("      - Windows Settings > Devices > Bluetooth\n");
-        recommendations.push_str("      - Make sure 'Allow Bluetooth devices to find this PC' is ON\n");
-        recommendations.push_str("      - Disable and re-enable Bluetooth adapter\n\n");
-        
-        recommendations.push_str("   3. PRIVACY SETTINGS:\n");
-        recommendations.push_str("      - Windows Settings > Privacy & Security > Bluetooth\n");
-        recommendations.push_str("      - Allow apps to access Bluetooth\n");
-        recommendations.push_str("      - Allow desktop apps to access Bluetooth\n\n");
-        
-        recommendations.push_str("   4. ADMINISTRATOR MODE:\n");
-        recommendations.push_str("      - Try running BitChat as Administrator\n");
-        recommendations.push_str("      - Right-click > 'Run as Administrator'\n\n");
-        
-        recommendations.push_str("   5. HARDWARE CHECK:\n");
-        recommendations.push_str("      - Make sure you have a Bluetooth 4.0+ adapter\n");
-        recommendations.push_str("      - External USB Bluetooth adapters often work better\n");
-        recommendations.push_str("      - Intel and Qualcomm adapters generally have better support\n\n");
-        
-        recommendations.push_str("   6. BITCHAT COMPATIBILITY VERIFICATION:\n");
-        recommendations.push_str("      - Device name format: 16 hex characters (iOS/macOS compatible)\n");
-        recommendations.push_str("      - Service UUID: F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C\n");
-        recommendations.push_str("      - Company ID: 0xFFFF for manufacturer data\n\n");
-        
-        recommendations.push_str("   7. ALTERNATIVE APPROACH:\n");
-        recommendations.push_str("      - Use Raspberry Pi for reliable advertising\n");
-        recommendations.push_str("      - Windows devices can still discover and connect\n");
-        recommendations.push_str("      - This is the most reliable setup for BitChat mesh\n");
-        
-        recommendations
-    }
-
-    #[cfg(not(windows))]
-    pub async fn diagnose_advertising_support(&self) -> String {
-        "Bluetooth LE advertising diagnostics only available on Windows.".to_string()
+    /// Get our peer ID
+    pub fn get_peer_id(&self) -> &str {
+        &self.my_peer_id
     }
 }
