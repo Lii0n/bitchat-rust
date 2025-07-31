@@ -21,6 +21,7 @@ use chacha20poly1305::{
 };
 use argon2::{Argon2, password_hash::{PasswordHasher as _, SaltString}};
 use blake3::Hasher;
+use zeroize::Zeroize;
 
 // ============================================================================
 // CRYPTOGRAPHIC CONSTANTS
@@ -119,7 +120,7 @@ impl BitChatIdentity {
 pub struct EncryptionSession {
     /// Peer's public DH key
     pub remote_public_key: X25519PublicKey,
-    /// Peer's signing public key
+    /// Peer's signing public key (doesn't implement Zeroize)
     pub remote_signing_key: Option<VerifyingKey>,
     /// Shared secret for this session
     pub shared_secret: [u8; 32],
@@ -213,6 +214,13 @@ impl EncryptionSession {
     pub fn needs_rekey(&self) -> bool {
         self.created_at.elapsed() > SESSION_TIMEOUT || 
         self.message_count > REKEY_MESSAGE_LIMIT
+    }
+}
+
+impl Drop for EncryptionSession {
+    fn drop(&mut self) {
+        // Manually zeroize the shared secret since we skipped it in ZeroizeOnDrop
+        self.shared_secret.zeroize();
     }
 }
 
@@ -538,7 +546,7 @@ impl BitChatEncryption {
 }
 
 /// Encryption statistics
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct EncryptionStats {
     pub active_sessions: usize,
     pub pending_handshakes: usize,

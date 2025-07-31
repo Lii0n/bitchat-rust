@@ -12,7 +12,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce, Key
 };
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, Algorithm, Version, Params};
-use argon2::password_hash::{rand_core::RngCore, PasswordHashString, SaltString};
+use argon2::password_hash::{PasswordHashString, SaltString};
 use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use tracing::{debug, warn, info};
@@ -44,9 +44,6 @@ struct ChannelCipher {  // Removed Debug derive since ChaCha20Poly1305 doesn't i
     
     /// Password hash for verification
     password_hash: PasswordHashString,
-    
-    /// Salt used for key derivation
-    salt: SaltString,
     
     /// Message counter for nonce generation
     message_counter: u64,
@@ -125,7 +122,6 @@ impl ChannelEncryption {
             name: channel_name.to_string(),
             cipher,
             password_hash: password_hash.serialize(),
-            salt,
             message_counter: 0,
             joined_at: std::time::Instant::now(),
             message_count: 0,

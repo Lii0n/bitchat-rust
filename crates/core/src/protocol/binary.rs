@@ -309,7 +309,7 @@ impl BitchatPacket {
             return Err(anyhow!("Invalid protocol version: {}", self.version));
         }
         
-        if self.ttl == 0 || self.ttl > MAX_TTL {
+        if self.ttl > MAX_TTL {
             return Err(anyhow!("Invalid TTL: {}", self.ttl));
         }
         

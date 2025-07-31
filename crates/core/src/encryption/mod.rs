@@ -4,9 +4,11 @@
 
 //! Encryption and cryptographic operations for BitChat
 
-// Only include the modules that actually exist
+// Include all encryption modules
 pub mod legacy;
 pub mod channels;
+pub mod noise;
+pub mod unified;
 
 // Re-export types for backward compatibility
 pub use legacy::{
@@ -22,6 +24,20 @@ pub use channels::{
     ChannelInfo,
 };
 
-// For now, use BitChatEncryption as the main manager
-// Later we can create a full EncryptionManager that combines both
-pub type EncryptionManager = BitChatEncryption;
+// Re-export Noise Protocol types
+pub use noise::{
+    NoiseManager,
+    NoiseSession,
+    NoiseStats,
+};
+
+// Re-export unified encryption types (NEW PRIMARY INTERFACE)
+pub use unified::{
+    UnifiedEncryptionManager,
+    UnifiedEncryptionStats,
+    EncryptionStrategy,
+    EncryptionContext,
+};
+
+// Use UnifiedEncryptionManager as the main manager (replaces BitChatEncryption)
+pub type EncryptionManager = UnifiedEncryptionManager;

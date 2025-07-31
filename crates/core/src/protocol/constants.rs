@@ -7,7 +7,11 @@
 //! This extends the existing constants without duplicating Bluetooth constants.
 
 // Re-export shared constants from bluetooth module for now
+#[cfg(feature = "bluetooth")]
 pub use crate::bluetooth::constants::protocol::PROTOCOL_VERSION;
+
+#[cfg(not(feature = "bluetooth"))]
+pub const PROTOCOL_VERSION: u8 = 2;
 
 // Moon protocol updates the version
 pub const MOON_PROTOCOL_VERSION: u8 = 2;

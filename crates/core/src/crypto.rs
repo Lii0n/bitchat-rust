@@ -80,8 +80,12 @@ impl CryptoManager {
 
 impl Drop for CryptoManager {
     fn drop(&mut self) {
-        // Zeroize sensitive data if possible
-        // Note: SigningKey doesn't implement Zeroize in ed25519-dalek 2.x
-        // The sensitive data will be cleared when the struct is dropped
+        // Clear the X25519 secret key if it still exists
+        if self.x25519_secret.is_some() {
+            self.x25519_secret = None;
+        }
+        
+        // Note: SigningKey and EphemeralSecret handle their own zeroization
+        // in ed25519-dalek and x25519-dalek respectively when dropped
     }
 }

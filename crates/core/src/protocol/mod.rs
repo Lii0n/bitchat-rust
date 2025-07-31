@@ -11,6 +11,7 @@
 
 pub mod binary;
 pub mod constants;
+pub mod router;
 
 // Re-export existing protocol types from binary module
 pub use binary::{
@@ -19,6 +20,17 @@ pub use binary::{
     BinaryProtocol,
     peer_utils,
     // Add any other exports that exist in your binary.rs
+};
+
+// Re-export router types
+pub use router::{
+    PacketRouter,
+    RoutingDecision,
+    DropReason,
+    RouteEntry,
+    RoutingStats,
+    decrement_packet_ttl,
+    should_forward_packet,
 };
 
 // Re-export Moon protocol types from constants
@@ -36,7 +48,11 @@ pub use constants::{
 };
 
 // Keep the existing PROTOCOL_VERSION from bluetooth constants
+#[cfg(feature = "bluetooth")]
 pub use crate::bluetooth::constants::protocol::PROTOCOL_VERSION;
+
+#[cfg(not(feature = "bluetooth"))]
+pub const PROTOCOL_VERSION: u8 = 2;
 
 // ==============================================================================
 // PROTOCOL ERRORS (only define once)

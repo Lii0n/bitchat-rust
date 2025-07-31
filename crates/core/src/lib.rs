@@ -12,12 +12,11 @@ pub mod config;
 pub mod crypto;
 pub mod storage;
 pub mod protocol;
-pub mod commands;
 pub mod encryption;
-pub mod message;
+pub mod message;  
 pub mod peer;
-pub mod channel;
 pub mod messaging;
+pub mod commands;
 
 // Bluetooth module (conditional compilation)
 #[cfg(feature = "bluetooth")]
@@ -25,14 +24,19 @@ pub mod bluetooth;
 
 // Re-export main types from each module
 pub use config::Config;
-pub use crypto::CryptoManager;
 pub use storage::Storage;
 
 // Protocol re-exports
 pub use protocol::{BitchatPacket, MessageType, BinaryProtocol};
 
-// Encryption re-exports
-pub use encryption::{BitChatEncryption, BitChatIdentity, EncryptionStats};
+// Encryption re-exports (UNIFIED SYSTEM)
+pub use encryption::{
+    UnifiedEncryptionManager, 
+    EncryptionManager,
+    EncryptionStrategy,
+    EncryptionContext,
+    UnifiedEncryptionStats,
+};
 
 // Bluetooth re-exports (only when feature is enabled)
 #[cfg(feature = "bluetooth")]
@@ -40,61 +44,12 @@ pub use bluetooth::{BluetoothManager, BluetoothConfig, BluetoothEvent, Connected
 
 // Standard library imports
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tokio::sync::{Mutex, RwLock};
 use anyhow::Result;
 
-/// Channel management for BitChat
-#[derive(Debug)]
-pub struct ChannelManager {
-    channels: HashMap<String, Channel>,
-}
-
-/// Channel information
-#[derive(Debug, Clone)]
-pub struct Channel {
-    pub name: String,
-    pub password: Option<String>,
-    pub members: HashSet<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl ChannelManager {
-    pub fn new() -> Self {
-        Self {
-            channels: HashMap::new(),
-        }
-    }
-    
-    pub fn create_channel(&mut self, name: String, password: Option<String>) -> Result<()> {
-        let channel = Channel {
-            name: name.clone(),
-            password,
-            members: HashSet::new(),
-            created_at: chrono::Utc::now(),
-        };
-        self.channels.insert(name, channel);
-        Ok(())
-    }
-    
-    pub fn join_channel(&mut self, channel_name: &str, peer_id: String) -> Result<()> {
-        if let Some(channel) = self.channels.get_mut(channel_name) {
-            channel.members.insert(peer_id);
-        }
-        Ok(())
-    }
-    
-    pub fn leave_channel(&mut self, channel_name: &str, peer_id: &str) -> Result<()> {
-        if let Some(channel) = self.channels.get_mut(channel_name) {
-            channel.members.remove(peer_id);
-        }
-        Ok(())
-    }
-    
-    pub fn list_channels(&self) -> Vec<&Channel> {
-        self.channels.values().collect()
-    }
-}
+// Channel management moved to commands::channel::ChannelManager
+// This removes the duplicate ChannelManager implementation
 
 /// Peer management for BitChat
 #[derive(Debug)]
@@ -173,13 +128,13 @@ pub struct BitchatCore {
     #[cfg(feature = "bluetooth")]
     pub bluetooth: Arc<Mutex<BluetoothManager>>,
     
-    // Core components
-    pub crypto: CryptoManager,
+    // Core components (UNIFIED ENCRYPTION)
+    pub encryption: EncryptionManager,
     pub peer_manager: PeerManager,
     pub storage: Storage,
     pub config: Config,
     pub packet_router: Arc<RwLock<PacketRouter>>,
-    pub channel_manager: Arc<Mutex<ChannelManager>>,
+    pub channel_manager: Arc<Mutex<crate::messaging::channel::ChannelManager>>,
     pub my_peer_id: [u8; 8],
 }
 
@@ -192,7 +147,7 @@ impl std::fmt::Debug for BitchatCore {
         debug_struct.field("bluetooth", &"Arc<Mutex<BluetoothManager>>");
         
         debug_struct
-            .field("crypto", &"CryptoManager")
+            .field("encryption", &"UnifiedEncryptionManager")
             .field("peer_manager", &self.peer_manager)
             .field("storage", &self.storage)
             .field("config", &self.config)
@@ -207,7 +162,7 @@ impl BitchatCore {
     /// Create new BitChat core instance
     pub async fn new(config: Config) -> Result<Self> {
         let storage = Storage::new(&config.data_dir.to_string_lossy())?;
-        let crypto = CryptoManager::new()?;
+        let encryption = EncryptionManager::new()?;
         let peer_manager = PeerManager::new();
         
         // Generate our peer ID from device name
@@ -215,7 +170,7 @@ impl BitchatCore {
         
         // Create packet router and channel manager
         let packet_router = Arc::new(RwLock::new(PacketRouter::new(my_peer_id)));
-        let channel_manager = Arc::new(Mutex::new(ChannelManager::new()));
+        let channel_manager = Arc::new(Mutex::new(crate::messaging::channel::ChannelManager::new()));
         
         // Create bluetooth manager (only when feature is enabled)
         #[cfg(feature = "bluetooth")]
@@ -231,7 +186,7 @@ impl BitchatCore {
         Ok(Self {
             #[cfg(feature = "bluetooth")]
             bluetooth,
-            crypto,
+            encryption,
             peer_manager,
             storage,
             config,
@@ -265,11 +220,9 @@ impl BitchatCore {
     }
     
     /// Join a channel
-    pub async fn join_channel(&self, channel: &str, password: Option<&str>) -> Result<()> {
+    pub async fn join_channel(&self, channel: &str, _password: Option<&str>) -> Result<()> {
         let mut channel_manager = self.channel_manager.lock().await;
-        channel_manager.create_channel(channel.to_string(), password.map(|s| s.to_string()))?;
-        let peer_id = hex::encode(self.my_peer_id);
-        channel_manager.join_channel(channel, peer_id)?;
+        channel_manager.join_channel(channel)?;
         tracing::info!("Joined channel: {}", channel);
         Ok(())
     }
@@ -277,8 +230,7 @@ impl BitchatCore {
     /// Leave a channel
     pub async fn leave_channel(&self, channel: &str) -> Result<()> {
         let mut channel_manager = self.channel_manager.lock().await;
-        let peer_id = hex::encode(self.my_peer_id);
-        channel_manager.leave_channel(channel, &peer_id)?;
+        channel_manager.leave_channel(channel)?;
         tracing::info!("Left channel: {}", channel);
         Ok(())
     }
@@ -286,11 +238,7 @@ impl BitchatCore {
     /// List joined channels
     pub async fn list_channels(&self) -> Result<Vec<String>> {
         let channel_manager = self.channel_manager.lock().await;
-        let channels = channel_manager.list_channels()
-            .into_iter()
-            .map(|c| c.name.clone())
-            .collect();
-        Ok(channels)
+        Ok(channel_manager.get_joined_channels())
     }
     
     /// Get list of connected peers
@@ -322,7 +270,7 @@ impl BitchatCore {
                     BluetoothEvent::PeerDisconnected { peer_id } => {
                         delegate_clone.on_device_disconnected("unknown_device", peer_id);
                     }
-                    BluetoothEvent::PacketReceived { peer_id, packet_size, .. } => {
+                    BluetoothEvent::PacketReceived { peer_id, .. } => {
                         // For now, just send empty data - in a real implementation,
                         // you'd extract the actual message data
                         delegate_clone.on_message_received(peer_id, &[]);
