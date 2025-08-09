@@ -70,6 +70,7 @@ pub enum MessageType {
     KeyExchange = 2,        // Cryptographic key exchange
     Leave = 3,              // Peer departure notification
     Message = 4,            // Text/data message
+    DirectMessage = 17,     // Direct peer-to-peer message
     
     // Fragmentation support
     FragmentStart = 5,      // First fragment of large message
@@ -86,6 +87,10 @@ pub enum MessageType {
     DeliveryAck = 12,       // Message delivery acknowledgment
     DeliveryStatusRequest = 13, // Request delivery status
     ReadReceipt = 14,       // Message read confirmation
+    
+    // Network diagnostics
+    Ping = 15,              // Connectivity test request
+    Pong = 16,              // Connectivity test response
 }
 
 impl MessageType {
@@ -105,6 +110,9 @@ impl MessageType {
             12 => Ok(MessageType::DeliveryAck),
             13 => Ok(MessageType::DeliveryStatusRequest),
             14 => Ok(MessageType::ReadReceipt),
+            15 => Ok(MessageType::Ping),
+            16 => Ok(MessageType::Pong),
+            17 => Ok(MessageType::DirectMessage),
             _ => Err(anyhow!("Invalid message type: {}", value)),
         }
     }
@@ -735,6 +743,18 @@ impl BinaryProtocol {
                     Err(_) => {
                         // Decryption failed, might be unencrypted or we don't have session
                         debug!("Failed to decrypt private message from {}", sender_peer_id);
+                        Ok(packet.payload.clone())
+                    }
+                }
+            },
+            MessageType::DirectMessage => {
+                // Direct message - decrypt if encrypted
+                let sender_peer_id = bytes_to_peer_id(&packet.sender_id);
+                match self.encryption.decrypt_private_message(&sender_peer_id, &packet.payload) {
+                    Ok(decrypted) => Ok(decrypted),
+                    Err(_) => {
+                        // Decryption failed, might be unencrypted or we don't have session
+                        debug!("Failed to decrypt direct message from {}, using plaintext", sender_peer_id);
                         Ok(packet.payload.clone())
                     }
                 }

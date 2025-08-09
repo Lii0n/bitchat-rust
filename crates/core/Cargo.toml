@@ -47,6 +47,19 @@ tokio-stream = { workspace = true }
 toml = { workspace = true }
 lz4 = { workspace = true }
 
+# Database
+rusqlite = { workspace = true }
+
+# Network discovery dependencies
+async-trait = { workspace = true }
+base64 = { workspace = true }
+
+# Nostr and WebSocket dependencies
+tokio-tungstenite = { workspace = true }
+url = { workspace = true }
+tungstenite = { workspace = true }
+
+
 # Platform-specific Bluetooth dependencies (conditional)
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
@@ -60,3 +73,4 @@ bluetooth = []  # Feature flag to enable Bluetooth functionality
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3.0"

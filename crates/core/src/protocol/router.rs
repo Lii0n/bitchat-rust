@@ -477,6 +477,7 @@ pub fn should_forward_packet(packet: &BitchatPacket) -> bool {
     match packet.message_type {
         MessageType::Announce => true,      // Always forward announcements
         MessageType::Message => true,       // Forward messages
+        MessageType::DirectMessage => false, // Direct messages are not forwarded (direct only)
         MessageType::KeyExchange => false,  // Key exchanges are direct only
         MessageType::Leave => true,         // Forward leave announcements
         MessageType::ChannelAnnounce => true, // Forward channel announcements

@@ -44,6 +44,8 @@ pub enum MoonMessageType {
     // Network management
     PeerQuery = 0x40,         // Request peer information
     PeerResponse = 0x41,      // Peer information response
+    Ping = 0x42,              // Connectivity test request
+    Pong = 0x43,              // Connectivity test response
     
     // Protocol negotiation
     VersionHello = 0x50,      // Protocol version negotiation
@@ -114,7 +116,9 @@ impl MoonMessageType {
             MoonMessageType::PrivateMessage |
             MoonMessageType::PeerQuery |
             MoonMessageType::PeerResponse |
-            MoonMessageType::CachedMessage => MessagePriority::Normal,
+            MoonMessageType::CachedMessage |
+            MoonMessageType::Ping |
+            MoonMessageType::Pong => MessagePriority::Normal,
             
             MoonMessageType::PublicMessage |
             MoonMessageType::Announce |
@@ -141,6 +145,8 @@ impl TryFrom<u8> for MoonMessageType {
             0x31 => Ok(MoonMessageType::MessageAck),
             0x40 => Ok(MoonMessageType::PeerQuery),
             0x41 => Ok(MoonMessageType::PeerResponse),
+            0x42 => Ok(MoonMessageType::Ping),
+            0x43 => Ok(MoonMessageType::Pong),
             0x50 => Ok(MoonMessageType::VersionHello),
             0x51 => Ok(MoonMessageType::VersionAck),
             _ => Err(anyhow::anyhow!("Invalid Moon message type: {}", value)),

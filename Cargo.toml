@@ -43,6 +43,7 @@ rand_core = "0.6"
 # Bluetooth LE (remove optional here)
 btleplug = { version = "0.11", default-features = false }
 
+
 # Windows-specific Bluetooth (remove optional here)
 windows = { version = "0.52", features = [
     "Win32_Devices_Bluetooth",
@@ -73,6 +74,18 @@ toml = "0.8"
 
 # Compression
 lz4 = "1.24"
+
+# Database
+rusqlite = { version = "0.30", features = ["bundled", "chrono"] }
+
+# Network discovery dependencies
+async-trait = "0.1"
+base64 = "0.22"
+
+# Nostr and WebSocket dependencies
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+url = "2.4"
+tungstenite = "0.21"
 
 [profile.release]
 opt-level = 2

@@ -29,19 +29,14 @@ use {
                 BluetoothLEManufacturerData,
                 BluetoothLEScanningMode,
             },
-            BluetoothAdapter,
         },
-        Storage::Streams::{DataReader, DataWriter},
-        Foundation::{TypedEventHandler, Collections::IVector},
+        Storage::Streams::DataWriter,
+        Foundation::TypedEventHandler,
     },
 };
 
 // FIXED: Use correct import paths based on project knowledge
-use crate::bluetooth::constants::{
-    BITCHAT_SERVICE,
-    advertising::BITCHAT_COMPANY_ID,
-    protocol::MAX_MESSAGE_SIZE,
-};
+use crate::bluetooth::constants::BITCHAT_SERVICE;
 
 /// Discovered device information
 #[derive(Clone, Debug)]
@@ -217,8 +212,9 @@ impl WindowsBluetoothAdapter {
         let advertisement = publisher.Advertisement()
             .map_err(|e| anyhow!("Failed to get advertisement: {}", e))?;
 
-        // Step 1: Find a working device name
+        // Step 1: Try pure iOS format first, then fallbacks
         let windows_compatible_names = vec![
+            self.my_peer_id.clone(),                        // Pure iOS format (16 hex chars)
             format!("BitChat-{}", &self.my_peer_id[..8]),  // BitChat-57900386
             format!("BC-{}", &self.my_peer_id[..8]),       // BC-57900386 
             format!("Device-{}", &self.my_peer_id[..6]),   // Device-579003
@@ -234,7 +230,7 @@ impl WindowsBluetoothAdapter {
                     working_device_name = Some(device_name.clone());
                     break;
                 }
-                Err(e) => {
+                Err(_) => {
                     warn!("❌ Device name rejected: '{}'", device_name);
                     continue;
                 }
@@ -244,62 +240,43 @@ impl WindowsBluetoothAdapter {
         let final_device_name = working_device_name
             .ok_or_else(|| anyhow!("No Windows-compatible device names accepted"))?;
 
-        // Step 2: Test device name only (no payload) first
-        info!("🧪 STEP 2A: Testing device name only (no payload)");
+        // Step 2: Try multiple Windows BLE configurations systematically
+        info!("🧪 STEP 2: Testing Windows BLE configurations systematically...");
+        
+        // Configuration 1: Device name + Service UUID + Manufacturer Data (Full iOS compatibility)
+        info!("🧪 STEP 2A: Full iOS configuration (name + service + manufacturer data)");
+        if let Ok(result) = self.try_full_ios_configuration(&publisher, &advertisement, &final_device_name).await {
+            return Ok(result);
+        }
+        
+        // Configuration 2: Device name + Service UUID only
+        info!("🧪 STEP 2B: Service UUID configuration (name + service UUID)");
+        if let Ok(result) = self.try_service_uuid_configuration(&publisher, &advertisement, &final_device_name).await {
+            return Ok(result);
+        }
+        
+        // Configuration 3: Device name + Manufacturer Data only
+        info!("🧪 STEP 2C: Manufacturer data configuration (name + manufacturer data)");
+        if let Ok(result) = self.try_manufacturer_data_configuration(&publisher, &advertisement, &final_device_name).await {
+            return Ok(result);
+        }
+        
+        // Configuration 4: Device name only (most basic)
+        info!("🧪 STEP 2D: Basic device name only");
         match self.test_device_name_only(&publisher).await {
             Ok(_) => {
-                info!("✅ Device name only works! Now adding manufacturer data...");
-                
-                // Step 3: Add manufacturer data carefully
-                match self.add_compatible_manufacturer_data(&advertisement).await {
-                    Ok(_) => {
-                        info!("📡 Manufacturer data added successfully");
-                        
-                        // Step 4: Try to start with device name + manufacturer data
-                        info!("🧪 STEP 2B: Testing device name + manufacturer data");
-                        match publisher.Start() {
-                            Ok(_) => {
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                                
-                                let status = publisher.Status()?;
-                                let status_str = format!("{:?}", status);
-                                
-                                if status_str.contains("Started") {
-                                    self.publisher = Some(publisher);
-                                    *self.is_advertising.write().await = true;
-                                    
-                                    info!("🎉 SUCCESS: Windows BLE advertising with BitChat compatibility!");
-                                    info!("📱 Device name: '{}'", final_device_name);
-                                    info!("🔍 Real peer ID in manufacturer data: '{}'", self.my_peer_id);
-                                    
-                                    return Ok(AdvertisingResult {
-                                        strategy_name: "Windows-Compatible BitChat Format".to_string(),
-                                        success: true,
-                                        error_message: None,
-                                        advertised_name: Some(final_device_name),
-                                        publisher_status: Some(status_str),
-                                    });
-                                } else {
-                                    publisher.Stop().ok();
-                                    return Err(anyhow!("Publisher status not Started: {}", status_str));
-                                }
-                            }
-                            Err(e) => {
-                                return Err(anyhow!("Publisher start failed with manufacturer data: {}", e));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("❌ Manufacturer data failed: {}", e);
-                        
-                        // Fallback: Just use device name only
-                        info!("🔄 Fallback: Using device name only");
-                        return self.finalize_device_name_only(&publisher, final_device_name).await;
-                    }
-                }
+                info!("🔄 Fallback: Using device name only (limited iOS compatibility)");
+                return self.finalize_device_name_only(&publisher, final_device_name).await;
             }
             Err(e) => {
-                return Err(anyhow!("Even device name only failed: {}", e));
+                warn!("❌ All standard Windows BLE configurations failed. Trying hardware-specific fallbacks...");
+                
+                // Try hardware-specific fallbacks
+                if let Ok(result) = self.try_hardware_fallbacks(&publisher, &advertisement, &final_device_name).await {
+                    return Ok(result);
+                }
+                
+                return Err(anyhow!("All Windows BLE configurations failed, including hardware fallbacks. Last error: {}", e));
             }
         }
     }
@@ -330,6 +307,226 @@ impl WindowsBluetoothAdapter {
         }
     }
 
+    /// Try full iOS configuration (name + service UUID + manufacturer data)
+    #[cfg(windows)]
+    async fn try_full_ios_configuration(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement, device_name: &str) -> Result<AdvertisingResult> {
+        // Clear everything first
+        if let Ok(service_uuids) = advertisement.ServiceUuids() { service_uuids.Clear().ok(); }
+        if let Ok(mfg_data) = advertisement.ManufacturerData() { mfg_data.Clear().ok(); }
+        
+        // Add service UUID
+        if let Err(e) = self.add_bitchat_service_uuid(&advertisement).await {
+            return Err(anyhow!("Failed to add service UUID: {}", e));
+        }
+        
+        // Add manufacturer data
+        if let Err(e) = self.add_compatible_manufacturer_data(&advertisement).await {
+            return Err(anyhow!("Failed to add manufacturer data: {}", e));
+        }
+        
+        // Test the full configuration
+        self.test_advertising_configuration(publisher, device_name, "Full iOS (name + service + mfg data)").await
+    }
+    
+    /// Try service UUID only configuration
+    #[cfg(windows)]
+    async fn try_service_uuid_configuration(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement, device_name: &str) -> Result<AdvertisingResult> {
+        // Clear everything first
+        if let Ok(service_uuids) = advertisement.ServiceUuids() { service_uuids.Clear().ok(); }
+        if let Ok(mfg_data) = advertisement.ManufacturerData() { mfg_data.Clear().ok(); }
+        
+        // Add only service UUID
+        if let Err(e) = self.add_bitchat_service_uuid(&advertisement).await {
+            return Err(anyhow!("Failed to add service UUID: {}", e));
+        }
+        
+        // Test service UUID configuration
+        self.test_advertising_configuration(publisher, device_name, "Service UUID (name + service)").await
+    }
+    
+    /// Try manufacturer data only configuration
+    #[cfg(windows)]
+    async fn try_manufacturer_data_configuration(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement, device_name: &str) -> Result<AdvertisingResult> {
+        // Clear everything first
+        if let Ok(service_uuids) = advertisement.ServiceUuids() { service_uuids.Clear().ok(); }
+        if let Ok(mfg_data) = advertisement.ManufacturerData() { mfg_data.Clear().ok(); }
+        
+        // Add only manufacturer data
+        if let Err(e) = self.add_compatible_manufacturer_data(&advertisement).await {
+            return Err(anyhow!("Failed to add manufacturer data: {}", e));
+        }
+        
+        // Test manufacturer data configuration
+        self.test_advertising_configuration(publisher, device_name, "Manufacturer Data (name + mfg data)").await
+    }
+    
+    /// Test a specific advertising configuration
+    #[cfg(windows)]
+    async fn test_advertising_configuration(&mut self, publisher: &BluetoothLEAdvertisementPublisher, device_name: &str, config_name: &str) -> Result<AdvertisingResult> {
+        // Stop any previous advertising
+        publisher.Stop().ok();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Try to start
+        match publisher.Start() {
+            Ok(_) => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                
+                let status = publisher.Status()
+                    .map_err(|e| anyhow!("Failed to get status: {}", e))?;
+                let status_str = format!("{:?}", status);
+                
+                if status_str.contains("Started") {
+                    self.publisher = Some(publisher.clone());
+                    *self.is_advertising.write().await = true;
+                    
+                    info!("🎉 SUCCESS: {} configuration works!", config_name);
+                    info!("📱 Device name: '{}'", device_name);
+                    info!("📊 Publisher status: {}", status_str);
+                    
+                    return Ok(AdvertisingResult {
+                        strategy_name: config_name.to_string(),
+                        success: true,
+                        error_message: None,
+                        advertised_name: Some(device_name.to_string()),
+                        publisher_status: Some(status_str),
+                    });
+                } else {
+                    publisher.Stop().ok();
+                    return Err(anyhow!("Publisher status not Started: {}", status_str));
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                // Check for specific Windows error codes
+                if error_msg.contains("0x80070057") {
+                    return Err(anyhow!("Windows BLE parameter error (0x80070057) - configuration not supported by this adapter"));
+                } else {
+                    return Err(anyhow!("Publisher start failed: {}", error_msg));
+                }
+            }
+        }
+    }
+
+    /// Try hardware-specific fallback strategies
+    #[cfg(windows)]
+    async fn try_hardware_fallbacks(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement, device_name: &str) -> Result<AdvertisingResult> {
+        info!("🔧 Trying hardware-specific fallbacks for restrictive BLE adapters...");
+        
+        // Fallback 1: Minimal manufacturer data with simple company ID
+        info!("🧪 Fallback 1: Minimal manufacturer data (simple)");
+        if let Ok(result) = self.try_minimal_manufacturer_data(&publisher, &advertisement, device_name).await {
+            return Ok(result);
+        }
+        
+        // Fallback 2: Generic BLE service UUID (not BitChat specific)
+        info!("🧪 Fallback 2: Generic BLE service");
+        if let Ok(result) = self.try_generic_service_uuid(&publisher, &advertisement, device_name).await {
+            return Ok(result);
+        }
+        
+        // Fallback 3: Shortened device name for restrictive adapters
+        info!("🧪 Fallback 3: Shortened device names");
+        if let Ok(result) = self.try_shortened_device_names(&publisher, &advertisement).await {
+            return Ok(result);
+        }
+        
+        Err(anyhow!("All hardware fallbacks exhausted"))
+    }
+    
+    /// Try minimal manufacturer data for restrictive hardware
+    #[cfg(windows)]
+    async fn try_minimal_manufacturer_data(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement, device_name: &str) -> Result<AdvertisingResult> {
+        // Clear everything
+        if let Ok(service_uuids) = advertisement.ServiceUuids() { service_uuids.Clear().ok(); }
+        if let Ok(mfg_data_list) = advertisement.ManufacturerData() { mfg_data_list.Clear().ok(); }
+        
+        // Add minimal manufacturer data
+        if let Ok(mfg_data_list) = advertisement.ManufacturerData() {
+            let mfg_data = BluetoothLEManufacturerData::new()?;
+            
+            // Use most compatible company ID (Microsoft's for testing)
+            mfg_data.SetCompanyId(0x0006)?; // Microsoft company ID
+            
+            let data_writer = DataWriter::new()?;
+            // Just 2 bytes of data
+            data_writer.WriteBytes(&[0x01, 0x02])?;
+            
+            mfg_data.SetData(&data_writer.DetachBuffer()?)?;
+            mfg_data_list.Append(&mfg_data)?;
+            
+            info!("✅ Added minimal manufacturer data (Microsoft company ID)");
+        }
+        
+        self.test_advertising_configuration(publisher, device_name, "Minimal Manufacturer Data").await
+    }
+    
+    /// Try generic service UUID for restrictive hardware
+    #[cfg(windows)]
+    async fn try_generic_service_uuid(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement, device_name: &str) -> Result<AdvertisingResult> {
+        // Clear everything
+        if let Ok(service_uuids) = advertisement.ServiceUuids() { service_uuids.Clear().ok(); }
+        if let Ok(mfg_data) = advertisement.ManufacturerData() { mfg_data.Clear().ok(); }
+        
+        // Add a generic service UUID that's widely supported
+        if let Ok(service_uuids) = advertisement.ServiceUuids() {
+            // Use Heart Rate service UUID as it's widely supported
+            if let Ok(generic_guid) = Self::uuid_to_guid("0000180D-0000-1000-8000-00805F9B34FB") {
+                service_uuids.Append(generic_guid)?;
+                info!("✅ Added generic service UUID (Heart Rate) for compatibility");
+            }
+        }
+        
+        self.test_advertising_configuration(publisher, device_name, "Generic Service UUID").await
+    }
+    
+    /// Try shortened device names for restrictive hardware
+    #[cfg(windows)]
+    async fn try_shortened_device_names(&mut self, publisher: &BluetoothLEAdvertisementPublisher, advertisement: &BluetoothLEAdvertisement) -> Result<AdvertisingResult> {
+        // Clear everything
+        if let Ok(service_uuids) = advertisement.ServiceUuids() { service_uuids.Clear().ok(); }
+        if let Ok(mfg_data) = advertisement.ManufacturerData() { mfg_data.Clear().ok(); }
+        
+        // Try very short device names (some hardware is restrictive)
+        let short_names = vec![
+            format!("BC{}", &self.my_peer_id[..6]),     // BC579003
+            format!("BT{}", &self.my_peer_id[..6]),     // BT579003
+            "BitChat".to_string(),                       // BitChat
+            "BC".to_string(),                           // BC
+        ];
+        
+        for (i, short_name) in short_names.iter().enumerate() {
+            info!("🧪 Testing short name {}: '{}'", i + 1, short_name);
+            
+            // Set the short name
+            if let Ok(advertisement) = publisher.Advertisement() {
+                if advertisement.SetLocalName(&HSTRING::from(short_name)).is_ok() {
+                    if let Ok(result) = self.test_advertising_configuration(publisher, short_name, &format!("Short Name {}", i + 1)).await {
+                        return Ok(result);
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow!("All shortened device names failed"))
+    }
+
+    /// Add BitChat service UUID for iOS compatibility
+    #[cfg(windows)]
+    async fn add_bitchat_service_uuid(&self, advertisement: &BluetoothLEAdvertisement) -> Result<()> {
+        if let Ok(service_uuids) = advertisement.ServiceUuids() {
+            // Add the BitChat service UUID that iOS expects
+            if let Ok(bitchat_guid) = Self::uuid_to_guid(BITCHAT_SERVICE) {
+                service_uuids.Append(bitchat_guid)?;
+                info!("✅ Added BitChat service UUID for iOS compatibility");
+            } else {
+                return Err(anyhow!("Failed to convert BitChat service UUID"));
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Add manufacturer data in the safest possible way
     #[cfg(windows)]
     async fn add_compatible_manufacturer_data(&self, advertisement: &BluetoothLEAdvertisement) -> Result<()> {
@@ -338,28 +535,29 @@ impl WindowsBluetoothAdapter {
             
             let mfg_data = BluetoothLEManufacturerData::new()?;
             
-            // Use the most compatible company ID
-            mfg_data.SetCompanyId(0xFFFF)?; // Test/development ID
+            // Use BitChat company ID (or compatible fallback)
+            let company_id = 0x02BC; // BitChat company ID (if allocated) or 0xFFFF for test
+            mfg_data.SetCompanyId(company_id)?;
             
             let data_writer = DataWriter::new()?;
             
-            // Try the simplest possible manufacturer data first
-            // Just the BitChat signature without peer ID to test compatibility
-            data_writer.WriteBytes(&[0xBC, 0x01])?; // Just the signature
+            // ENHANCED: Always include minimal required data for Windows
+            data_writer.WriteBytes(&[0xBC, 0x01])?; // BitChat signature
             
-            // Only add peer ID if hex decode works
+            // Add peer ID bytes for iOS compatibility
             if let Ok(peer_id_bytes) = hex::decode(&self.my_peer_id) {
                 data_writer.WriteBytes(&peer_id_bytes)?;
-                info!("📡 Added peer ID bytes to manufacturer data");
+                info!("📡 Added full peer ID to manufacturer data for iOS compatibility");
             } else {
-                // Don't add anything else if hex decode fails
-                warn!("⚠️ Hex decode failed, using signature only");
+                // Fallback: add peer ID as UTF-8 bytes
+                data_writer.WriteBytes(self.my_peer_id.as_bytes())?;
+                warn!("⚠️ Using UTF-8 fallback for peer ID in manufacturer data");
             }
             
             mfg_data.SetData(&data_writer.DetachBuffer()?)?;
             mfg_data_list.Append(&mfg_data)?;
             
-            info!("✅ Manufacturer data configured with BitChat signature");
+            info!("✅ Enhanced manufacturer data configured for Windows + iOS compatibility");
         }
         
         Ok(())
@@ -699,7 +897,7 @@ impl WindowsBluetoothAdapter {
         
         let mut is_bitchat_device = false;
         let mut peer_id: Option<String> = None;
-        let mut nickname: Option<String> = None;
+        let nickname: Option<String> = None;
         let mut device_format = "Unknown";
         
         if let Some(advertisement) = advertisement {

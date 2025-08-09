@@ -7,6 +7,7 @@ pub mod config;
 pub mod events;
 pub mod manager;
 pub mod constants;
+pub mod gatt;
 
 #[cfg(windows)]
 pub mod windows;
@@ -17,6 +18,7 @@ pub use config::BluetoothConfig;
 pub use events::{BluetoothEvent, BluetoothEventListener, LoggingEventListener};
 pub use manager::{BluetoothManager, ConnectedPeer, DiscoveredDevice};
 pub use constants::*;
+pub use gatt::{GattManager, GattConnection};
 
 // Get platform info
 pub fn get_platform_info() -> &'static str {
